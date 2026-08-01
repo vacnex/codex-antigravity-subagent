@@ -1,0 +1,2 @@
+# Bundled third-party code may contain whitespace inside generated template literals.
+plugins/**/mcp/dist/*.cjs whitespace=-trailing-space

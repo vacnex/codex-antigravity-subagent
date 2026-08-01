@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [20, 24]
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+          cache-dependency-path: plugins/antigravity-subagent/mcp/package-lock.json
+      - name: Install dependencies
+        working-directory: plugins/antigravity-subagent/mcp
+        run: npm ci
+      - name: Type-check
+        working-directory: plugins/antigravity-subagent/mcp
+        run: npm run check
+      - name: Build bundled server
+        working-directory: plugins/antigravity-subagent/mcp
+        run: npm run build
+      - name: Test MCP protocol
+        working-directory: plugins/antigravity-subagent/mcp
+        run: npm run test:protocol
+      - name: Verify generated bundle is current
+        run: git diff --exit-code -- plugins/antigravity-subagent/mcp/dist/server.cjs
