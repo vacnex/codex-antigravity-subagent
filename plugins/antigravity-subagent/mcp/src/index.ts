@@ -104,7 +104,12 @@ function createServer(): McpServer {
       title: 'Check Antigravity CLI',
       description: 'Verify that Google Antigravity CLI is installed and return its executable path.',
       inputSchema: z.object({}),
-      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+      annotations: {
+        readOnlyHint: true,
+        openWorldHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+      },
     },
     async () => {
       const executable = await findAgy();
@@ -135,7 +140,12 @@ function createServer(): McpServer {
         agent: z.string().min(1).max(200).optional(),
         model: z.string().min(1).max(200).optional(),
       }),
-      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+      annotations: {
+        readOnlyHint: false,
+        openWorldHint: true,
+        destructiveHint: true,
+        idempotentHint: false,
+      },
     },
     async ({ prompt, cwd, mode, outputFormat, timeoutSeconds, agent, model }) => {
       const executable = await findAgy();

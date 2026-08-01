@@ -139,3 +139,5 @@ npm test
 `npm test` performs a real stdio MCP round trip and calls the installed `agy` CLI in `plan` mode. CI uses `npm run test:protocol` so contributors can validate the MCP handshake without an Antigravity account. The checked-in `dist/server.cjs` is the runtime artifact used by the installed plugin.
 
 Security reports and the trust model are documented in [SECURITY.md](SECURITY.md). Contributions are welcome through issues and pull requests.
+
+The project's [Privacy Policy](PRIVACY.md) and [Terms of Use](TERMS.md) apply to public directory distribution.
