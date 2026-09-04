@@ -27,7 +27,7 @@ async function createServer(): Promise<McpServer> {
     { name: 'agy-mcp-server', version: VERSION },
     {
       instructions:
-        'Use agy_check before first delegation. Prefer agy_start for implementation work, pass a friendly plan-step name, review delegated changes independently, use agy_status when recovery/state matters, use agy_followup for corrections, agy_cancel to interrupt an active turn without closing the conversation, and agy_close only after the worker passes review.',
+        'Use agy_check before first delegation. Managed agy_start/agy_followup launches return quickly while AGY continues in the background; use agy_result for the final turn response and agy_status for lifecycle/progress metadata. Pass a stable idempotencyKey for every plan-step start and correction retry so a lost/retried MCP call cannot create duplicate AGY work. Review delegated changes independently, use agy_cancel to interrupt an active turn, and agy_close only after the worker passes review.',
     },
   );
 
@@ -135,10 +135,11 @@ async function createServer(): Promise<McpServer> {
     'agy_start',
     {
       title: 'Start Antigravity Worker',
-      description: 'Start a persistent/resumable managed Antigravity worker.',
+      description: 'Start a persistent/resumable managed Antigravity worker. Persistent-stream starts return after the conversation handshake while the first turn continues in the background.',
       inputSchema: z.object({
         prompt: z.string().min(1).max(100_000),
         name: z.string().min(1).max(120).optional().describe('Friendly plan-step name stored only in the local worker ledger'),
+        idempotencyKey: z.string().min(1).max(200).optional().describe('Stable key for retries of the same logical plan step; prevents duplicate workers'),
         cwd: z.string().min(1),
         mode: z.enum(['plan', 'default', 'accept-edits']).default('accept-edits'),
         timeoutSeconds: z.number().int().min(1).max(1800).default(900),
@@ -146,20 +147,27 @@ async function createServer(): Promise<McpServer> {
         model: z.string().min(1).max(200).optional(),
         effort: z.enum(['low', 'medium', 'high']).optional(),
       }),
-      annotations: { readOnlyHint: false, openWorldHint: true, destructiveHint: true, idempotentHint: false },
+      annotations: { readOnlyHint: false, openWorldHint: true, destructiveHint: true, idempotentHint: true },
     },
-    async ({ prompt, name, cwd, mode, timeoutSeconds, agent, model, effort }, ctx) => {
-      const executable = await findAgy();
-      if (!executable) return { content: [{ type: 'text', text: 'Antigravity CLI was not found. Run agy_check first.' }], isError: true };
+    async ({ prompt, name, idempotencyKey, cwd, mode, timeoutSeconds, agent, model, effort }, ctx) => {
       const resolvedCwd = path.resolve(cwd);
       try { await access(resolvedCwd, constants.R_OK); } catch {
         return { content: [{ type: 'text', text: `Workspace is not accessible: ${resolvedCwd}` }], isError: true };
       }
+
+      // Retry dedupe happens before CLI discovery/model elicitation so a lost agy_start response
+      // can be retried without prompting again or creating a second Antigravity conversation.
+      const reused = await runtime.reuseExistingStart({ name, cwd: resolvedCwd, idempotencyKey });
+      if (reused) return reused;
+
+      const executable = await findAgy();
+      if (!executable) return { content: [{ type: 'text', text: 'Antigravity CLI was not found. Run agy_check first.' }], isError: true };
       const selection = await chooseModelAndEffort(ctx, executable, resolvedCwd, model, effort);
       if ('error' in selection) return { content: [{ type: 'text', text: selection.error }], isError: true };
       return await runtime.start({
         prompt,
         name,
+        idempotencyKey,
         cwd: resolvedCwd,
         mode,
         timeoutSeconds,
@@ -175,22 +183,40 @@ async function createServer(): Promise<McpServer> {
     'agy_followup',
     {
       title: 'Follow Up Antigravity Worker',
-      description: 'Send review feedback to an existing managed worker, recovering its saved conversation after restart when necessary.',
+      description: 'Launch review feedback on an existing managed worker. The turn runs in the background; use agy_result to retrieve its final response.',
       inputSchema: z.object({
         workerId: z.string().min(1),
         prompt: z.string().min(1).max(100_000),
+        idempotencyKey: z.string().min(1).max(200).optional().describe('Stable key for retries of this correction turn'),
         timeoutSeconds: z.number().int().min(1).max(1800).default(900),
       }),
-      annotations: { readOnlyHint: false, openWorldHint: true, destructiveHint: true, idempotentHint: false },
+      annotations: { readOnlyHint: false, openWorldHint: true, destructiveHint: true, idempotentHint: true },
     },
-    async ({ workerId, prompt, timeoutSeconds }, ctx) => runtime.followup({ workerId, prompt, timeoutSeconds, signal: ctx.mcpReq.signal }),
+    async ({ workerId, prompt, idempotencyKey, timeoutSeconds }, ctx) => runtime.followup({
+      workerId,
+      prompt,
+      idempotencyKey,
+      timeoutSeconds,
+      signal: ctx.mcpReq.signal,
+    }),
+  );
+
+  server.registerTool(
+    'agy_result',
+    {
+      title: 'Antigravity Worker Result',
+      description: 'Read the current/final result state of the latest managed worker turn without sending a new prompt. Final response text is kept only in MCP memory, never persisted to the ledger.',
+      inputSchema: z.object({ workerId: z.string().min(1) }),
+      annotations: { readOnlyHint: true, openWorldHint: false, destructiveHint: false, idempotentHint: true },
+    },
+    async ({ workerId }) => runtime.result(workerId),
   );
 
   server.registerTool(
     'agy_status',
     {
       title: 'Antigravity Worker Status',
-      description: 'Inspect one managed worker or list persisted active/recoverable workers.',
+      description: 'Inspect one managed worker or list persisted active/recoverable workers, including running-turn, timeout/cancel and duplicate-worker metadata.',
       inputSchema: z.object({ workerId: z.string().min(1).optional(), includeClosed: z.boolean().default(false) }),
       annotations: { readOnlyHint: true, openWorldHint: false, destructiveHint: false, idempotentHint: true },
     },
@@ -201,7 +227,7 @@ async function createServer(): Promise<McpServer> {
     'agy_cancel',
     {
       title: 'Cancel Antigravity Worker Turn',
-      description: 'Interrupt the active turn for a managed worker without deleting its recoverable Antigravity conversation.',
+      description: 'Interrupt the active background turn for a managed worker without deleting its recoverable Antigravity conversation.',
       inputSchema: z.object({ workerId: z.string().min(1) }),
       annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false, idempotentHint: true },
     },
