@@ -12,7 +12,8 @@
     "test": "node test/smoke.mjs",
     "test:streaming": "node test/streaming.mjs",
     "test:driver": "node test/driver.mjs",
-    "test:protocol": "npm run test:streaming && npm run test:driver && node test/smoke.mjs --protocol-only",
+    "test:store": "node test/store.mjs",
+    "test:protocol": "npm run test:streaming && npm run test:driver && npm run test:store && node test/smoke.mjs --protocol-only",
     "verify": "npm run check && npm run build && npm run test:protocol"
   },
   "dependencies": {
