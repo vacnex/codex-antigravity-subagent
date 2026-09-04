@@ -9,6 +9,7 @@ import { serveStdio } from '@modelcontextprotocol/server/stdio';
 import * as z from 'zod/v4';
 
 import { AgyPersistentDriver, type AgyDriverTurnResult } from './driver.js';
+import { WorkerLedger, withLedgerStatus } from './ledger.js';
 import {
   detectAgyStreamingCapabilities,
   type AgyStreamingCapabilities,
@@ -590,6 +591,7 @@ function managedStreamResult(
 function createServer(): McpServer {
   const workers = new Map<string, WorkerState>();
   const drivers = new Map<string, AgyPersistentDriver>();
+  const ledger = new WorkerLedger();
   const server = new McpServer(
     { name: 'agy-mcp-server', version: VERSION },
     {
@@ -816,7 +818,19 @@ function createServer(): McpServer {
             };
             workers.set(worker.workerId, worker);
             drivers.set(worker.workerId, driver);
-            return managedStreamResult(turn, worker, timeoutSeconds, driver.pid);
+            const persistenceError = await ledger.recordTurn(worker, {
+              transport: 'stream',
+              driverPid: driver.pid,
+              status: turn.result.status,
+              durationSeconds: turn.result.durationSeconds,
+              numTurns: turn.result.numTurns,
+              usage: turn.result.usage,
+              timedOut: turn.timedOut,
+            });
+            return withLedgerStatus(
+              managedStreamResult(turn, worker, timeoutSeconds, driver.pid),
+              persistenceError,
+            );
           } catch (error) {
             if (driver.isAlive) await driver.close().catch(() => undefined);
             throw error;
@@ -834,6 +848,18 @@ function createServer(): McpServer {
             createdAt: new Date().toISOString(),
           };
           workers.set(worker.workerId, worker);
+          const persistenceError = await ledger.recordTurn(worker, {
+            transport: 'oneshot',
+            status: envelope.status,
+            durationSeconds: envelope.duration_seconds,
+            numTurns: envelope.num_turns,
+            usage: envelope.usage,
+            timedOut: result.timedOut,
+          });
+          return withLedgerStatus(
+            managedResult(result, envelope, worker, timeoutSeconds),
+            persistenceError,
+          );
         }
         return managedResult(result, envelope, worker, timeoutSeconds);
       } catch (error) {
@@ -878,7 +904,19 @@ function createServer(): McpServer {
           if (turn.result?.conversationId && turn.result.conversationId !== worker.conversationId) {
             worker.conversationId = turn.result.conversationId;
           }
-          return managedStreamResult(turn, worker, timeoutSeconds, driver.pid);
+          const persistenceError = await ledger.recordTurn(worker, {
+            transport: 'stream',
+            driverPid: driver.pid,
+            status: turn.result?.status ?? 'ERROR',
+            durationSeconds: turn.result?.durationSeconds,
+            numTurns: turn.result?.numTurns,
+            usage: turn.result?.usage,
+            timedOut: turn.timedOut,
+          });
+          return withLedgerStatus(
+            managedStreamResult(turn, worker, timeoutSeconds, driver.pid),
+            persistenceError,
+          );
         }
         if (driver && !driver.isAlive) drivers.delete(workerId);
 
@@ -893,7 +931,18 @@ function createServer(): McpServer {
         if (envelope?.conversation_id && envelope.conversation_id !== worker.conversationId) {
           worker.conversationId = envelope.conversation_id;
         }
-        return managedResult(result, envelope, worker, timeoutSeconds);
+        const persistenceError = await ledger.recordTurn(worker, {
+          transport: 'oneshot',
+          status: envelope?.status ?? (result.exitCode === 0 && !result.timedOut ? 'SUCCESS' : 'ERROR'),
+          durationSeconds: envelope?.duration_seconds,
+          numTurns: envelope?.num_turns,
+          usage: envelope?.usage,
+          timedOut: result.timedOut,
+        });
+        return withLedgerStatus(
+          managedResult(result, envelope, worker, timeoutSeconds),
+          persistenceError,
+        );
       } catch (error) {
         return { content: [{ type: 'text', text: `Failed to resume Antigravity worker: ${error instanceof Error ? error.message : String(error)}` }], isError: true };
       }
@@ -936,11 +985,12 @@ function createServer(): McpServer {
         drivers.delete(workerId);
       }
 
+      const persistenceError = await ledger.markClosed(worker);
       workers.delete(workerId);
-      return {
+      return withLedgerStatus({
         content: [{ type: 'text', text: `Closed ${workerId}. Antigravity conversation ${worker.conversationId} remains resumable.` }],
         structuredContent: { workerId, conversationId: worker.conversationId, closed: true },
-      };
+      }, persistenceError);
     },
   );
 
