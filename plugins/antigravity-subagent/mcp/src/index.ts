@@ -243,6 +243,35 @@ async function listAgyModels(executable: string, cwd: string): Promise<ModelOpti
   throw new Error(`Could not list Antigravity models. ${failures.filter(Boolean).join(' | ')}`);
 }
 
+function inferPinnedEffort(model: string): Effort | undefined {
+  const match = model.match(/-(low|medium|high)$/i);
+  if (!match) return undefined;
+  return match[1].toLowerCase() as Effort;
+}
+
+function reconcileModelAndEffort(
+  models: ModelOption[],
+  model: string,
+  effort: Effort,
+): { model: string; effort: Effort } | { error: string } {
+  const pinnedEffort = inferPinnedEffort(model);
+  if (!pinnedEffort || pinnedEffort === effort) return { model, effort };
+
+  const family = model.slice(0, -(pinnedEffort.length + 1));
+  const desiredSlug = `${family}-${effort}`;
+  const sibling = models.find((option) => option.slug.toLowerCase() === desiredSlug.toLowerCase());
+  if (sibling) return { model: sibling.slug, effort };
+
+  return {
+    error: `Antigravity model ${model} pins effort ${pinnedEffort}, and no ${effort} variant is available for the same model family.`,
+  };
+}
+
+function appendModelAndEffortArgs(args: string[], model: string, effort: Effort): void {
+  args.push('--model', model);
+  if (!inferPinnedEffort(model)) args.push('--effort', effort);
+}
+
 async function chooseModelAndEffort(
   ctx: ServerContext,
   executable: string,
@@ -250,7 +279,15 @@ async function chooseModelAndEffort(
   requestedModel?: string,
   requestedEffort?: Effort,
 ): Promise<{ model: string; effort: Effort } | { error: string }> {
-  if (requestedModel && requestedEffort) return { model: requestedModel, effort: requestedEffort };
+  if (requestedModel && requestedEffort) {
+    const pinnedEffort = inferPinnedEffort(requestedModel);
+    if (pinnedEffort && pinnedEffort !== requestedEffort) {
+      return {
+        error: `Antigravity model ${requestedModel} already pins effort ${pinnedEffort}; requested effort ${requestedEffort} conflicts with that slug.`,
+      };
+    }
+    return { model: requestedModel, effort: requestedEffort };
+  }
 
   let models: ModelOption[] = [];
   if (!requestedModel) {
@@ -304,6 +341,15 @@ async function chooseModelAndEffort(
     const effort = requestedEffort ?? result.content?.effort;
     if (typeof model !== 'string' || !model) return { error: 'No Antigravity model was selected.' };
     if (effort !== 'low' && effort !== 'medium' && effort !== 'high') return { error: 'No valid Antigravity effort was selected.' };
+
+    if (!requestedModel) return reconcileModelAndEffort(models, model, effort);
+
+    const pinnedEffort = inferPinnedEffort(model);
+    if (pinnedEffort && pinnedEffort !== effort) {
+      return {
+        error: `Antigravity model ${model} already pins effort ${pinnedEffort}; selected effort ${effort} conflicts with that slug.`,
+      };
+    }
     return { model, effort };
   } catch (error) {
     return {
@@ -327,9 +373,8 @@ function buildManagedArgs(prompt: string, worker: Omit<WorkerState, 'workerId' |
     '--print', prompt,
     '--output-format', 'json',
     '--mode', worker.mode,
-    '--model', worker.model,
-    '--effort', worker.effort,
   ];
+  appendModelAndEffortArgs(args, worker.model, worker.effort);
   if (worker.agent) args.push('--agent', worker.agent);
   if (conversationId) args.push('--conversation', conversationId);
   return args;
@@ -459,7 +504,8 @@ function createServer(): McpServer {
         };
       }
 
-      const args = ['--print', prompt, '--output-format', outputFormat, '--mode', mode, '--model', selection.model, '--effort', selection.effort];
+      const args = ['--print', prompt, '--output-format', outputFormat, '--mode', mode];
+      appendModelAndEffortArgs(args, selection.model, selection.effort);
       if (agent) args.push('--agent', agent);
 
       try {
