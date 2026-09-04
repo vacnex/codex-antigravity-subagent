@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -129,8 +129,7 @@ export class WorkerStore {
       // so readers observe either the old complete record or the new complete record.
       await rename(temporary, target);
     } catch (error) {
-      // Leave the original target untouched on failure. The orphaned temp file is ignored
-      // by readers and can be cleaned safely by a later maintenance pass.
+      await rm(temporary, { force: true }).catch(() => undefined);
       throw error;
     }
   }
