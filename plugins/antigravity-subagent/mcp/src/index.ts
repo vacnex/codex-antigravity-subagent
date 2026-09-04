@@ -17,35 +17,17 @@ import {
 } from './cli.js';
 import { WorkerRuntime } from './runtime.js';
 
-const VERSION = '0.3.0';
-const MAX_RESPONSE_BYTES = 64 * 1024;
+const VERSION = '0.4.0';
 
-function clipResponse(text: string): { text: string; truncated: boolean } {
-  const encoded = Buffer.from(text, 'utf8');
-  if (encoded.length <= MAX_RESPONSE_BYTES) return { text, truncated: false };
-  return {
-    text: `${encoded.subarray(0, MAX_RESPONSE_BYTES).toString('utf8')}\n\n[Response truncated at 64 KiB]`,
-    truncated: true,
-  };
-}
-
-async function resolveWorkspace(cwd: string): Promise<{ cwd: string } | { error: string }> {
-  const resolved = path.resolve(cwd);
-  try {
-    await access(resolved, constants.R_OK);
-    return { cwd: resolved };
-  } catch {
-    return { error: `Workspace is not accessible: ${resolved}` };
-  }
-}
-
-function createServer(): McpServer {
+async function createServer(): Promise<McpServer> {
   const runtime = new WorkerRuntime();
+  await runtime.ensureRecovered();
+
   const server = new McpServer(
     { name: 'agy-mcp-server', version: VERSION },
     {
       instructions:
-        'Use agy_check before first delegation. Use agy_start for resumable work, agy_followup for review corrections, agy_status to inspect managed workers, agy_cancel to stop an active turn, and agy_close after review passes. Verify delegated output and workspace changes independently.',
+        'Use agy_check before first delegation. Prefer agy_start for implementation work, pass a friendly plan-step name, review delegated changes independently, use agy_status when recovery/state matters, use agy_followup for corrections, agy_cancel to interrupt an active turn without closing the conversation, and agy_close only after the worker passes review.',
     },
   );
 
@@ -53,35 +35,28 @@ function createServer(): McpServer {
     'agy_check',
     {
       title: 'Check Antigravity CLI',
-      description: 'Verify the Google Antigravity CLI installation and report capabilities used by this plugin.',
-      inputSchema: z.object({
-        refresh: z.boolean().default(false).describe('Bypass short-lived CLI/model capability caches'),
-      }),
+      description: 'Verify the Google Antigravity CLI installation and report managed-worker capabilities.',
+      inputSchema: z.object({ refresh: z.boolean().default(false).describe('Bypass short-lived executable/capability/model caches') }),
       annotations: { readOnlyHint: true, openWorldHint: false, destructiveHint: false, idempotentHint: true },
     },
     async ({ refresh }) => {
       const executable = await findAgy(refresh);
       if (!executable) {
-        return {
-          content: [{ type: 'text', text: 'Antigravity CLI was not found. Install the official `agy` CLI and authenticate it first.' }],
-          isError: true,
-        };
+        return { content: [{ type: 'text', text: 'Antigravity CLI was not found. Install and authenticate the official `agy` CLI first.' }], isError: true };
       }
       const report = await probeAgyCapabilities(executable, refresh);
-      const capabilityEntries = Object.entries(report.capabilities);
-      const streamingEntries = Object.entries(report.streaming);
-      const missing = capabilityEntries.filter(([, supported]) => !supported).map(([name]) => name);
+      const requiredEntries = Object.entries(report.capabilities);
+      const missing = requiredEntries.filter(([, supported]) => !supported).map(([name]) => name);
       const lines = [
         `Antigravity CLI is available at: ${executable}`,
         report.version ? `Version: ${report.version}` : 'Version: unknown',
-        `Capabilities: ${capabilityEntries.map(([name, supported]) => `${name}=${supported ? 'yes' : 'no'}`).join(', ')}`,
-        `Streaming: ${streamingEntries.map(([name, supported]) => `${name}=${supported ? 'yes' : 'no'}`).join(', ')}`,
+        `Capabilities: ${requiredEntries.map(([name, supported]) => `${name}=${supported ? 'yes' : 'no'}`).join(', ')}`,
+        `Streaming: ${Object.entries(report.streaming).map(([name, supported]) => `${name}=${supported ? 'yes' : 'no'}`).join(', ')}`,
       ];
       if (report.modelCount !== undefined) lines.push(`Models: ${report.modelCount} variants across ${report.baseModelCount ?? report.modelCount} base models`);
-      if (report.warnings.length > 0) lines.push(`Warnings: ${report.warnings.join(' | ')}`);
-      if (missing.length > 0) lines.push(`Missing capabilities: ${missing.join(', ')}`);
-      const recoveryWarnings = runtime.getRecoveryWarnings();
-      if (recoveryWarnings.length > 0) lines.push(`Worker recovery warnings: ${recoveryWarnings.join(' | ')}`);
+      const warnings = [...report.warnings, ...runtime.getRecoveryWarnings()];
+      if (warnings.length > 0) lines.push(`Warnings: ${warnings.join(' | ')}`);
+      if (missing.length > 0) lines.push(`Missing required capabilities: ${missing.join(', ')}`);
       return {
         content: [{ type: 'text', text: lines.join('\n') }],
         structuredContent: {
@@ -92,8 +67,7 @@ function createServer(): McpServer {
           streaming: report.streaming,
           modelCount: report.modelCount,
           baseModelCount: report.baseModelCount,
-          warnings: report.warnings,
-          workerRecoveryWarnings: recoveryWarnings,
+          warnings,
           compatible: missing.length === 0,
         },
         isError: missing.length > 0,
@@ -121,44 +95,39 @@ function createServer(): McpServer {
     async ({ prompt, cwd, mode, outputFormat, timeoutSeconds, agent, model, effort }, ctx) => {
       const executable = await findAgy();
       if (!executable) return { content: [{ type: 'text', text: 'Antigravity CLI was not found. Run agy_check first.' }], isError: true };
-      const workspace = await resolveWorkspace(cwd);
-      if ('error' in workspace) return { content: [{ type: 'text', text: workspace.error }], isError: true };
-      const selection = await chooseModelAndEffort(ctx, executable, workspace.cwd, model, effort);
+      const resolvedCwd = path.resolve(cwd);
+      try { await access(resolvedCwd, constants.R_OK); } catch {
+        return { content: [{ type: 'text', text: `Workspace is not accessible: ${resolvedCwd}` }], isError: true };
+      }
+      const selection = await chooseModelAndEffort(ctx, executable, resolvedCwd, model, effort);
       if ('error' in selection) return { content: [{ type: 'text', text: selection.error }], isError: true };
-
-      const result = await runAgy(
-        executable,
-        buildOneShotArgs(prompt, {
-          cwd: workspace.cwd,
-          mode: mode as RunMode,
-          agent,
-          model: selection.model,
-          effort: selection.effort as Effort,
-        }, undefined, outputFormat),
-        workspace.cwd,
-        timeoutSeconds * 1000,
-        { signal: ctx.mcpReq.signal },
-      );
-      const raw = result.timedOut
-        ? `Antigravity timed out after ${timeoutSeconds} seconds.`
-        : result.canceled
-          ? 'Antigravity request was canceled.'
-          : result.stdout.trim() || result.stderr.trim() || '(Antigravity returned no output)';
-      const clipped = clipResponse(raw);
-      return {
-        content: [{ type: 'text', text: clipped.text }],
-        structuredContent: {
-          exitCode: result.exitCode,
-          timedOut: result.timedOut,
-          canceled: result.canceled,
-          truncated: result.truncated || clipped.truncated,
-          mode,
-          cwd: workspace.cwd,
-          model: selection.model,
-          effort: selection.effort,
-        },
-        isError: result.timedOut || result.canceled || result.exitCode !== 0,
-      };
+      const execution = { cwd: resolvedCwd, mode: mode as RunMode, agent, model: selection.model, effort: selection.effort as Effort };
+      try {
+        const result = await runAgy(
+          executable,
+          buildOneShotArgs(prompt, execution, undefined, outputFormat),
+          resolvedCwd,
+          timeoutSeconds * 1000,
+          { signal: ctx.mcpReq.signal },
+        );
+        const output = result.stdout.trim() || result.stderr.trim() || '(Antigravity returned no output)';
+        return {
+          content: [{ type: 'text', text: output }],
+          structuredContent: {
+            exitCode: result.exitCode,
+            timedOut: result.timedOut,
+            canceled: result.canceled,
+            truncated: result.truncated,
+            mode,
+            cwd: resolvedCwd,
+            model: selection.model,
+            effort: selection.effort,
+          },
+          isError: result.timedOut || result.canceled || result.exitCode !== 0,
+        };
+      } catch (error) {
+        return { content: [{ type: 'text', text: `Failed to run Antigravity: ${error instanceof Error ? error.message : String(error)}` }], isError: true };
+      }
     },
   );
 
@@ -166,10 +135,10 @@ function createServer(): McpServer {
     'agy_start',
     {
       title: 'Start Antigravity Worker',
-      description: 'Start a named resumable Antigravity worker. The worker is persisted and can be recovered after MCP/Codex restart.',
+      description: 'Start a persistent/resumable managed Antigravity worker.',
       inputSchema: z.object({
         prompt: z.string().min(1).max(100_000),
-        name: z.string().min(1).max(120).optional().describe('Friendly plan/worker name for the local worker ledger'),
+        name: z.string().min(1).max(120).optional().describe('Friendly plan-step name stored only in the local worker ledger'),
         cwd: z.string().min(1),
         mode: z.enum(['plan', 'default', 'accept-edits']).default('accept-edits'),
         timeoutSeconds: z.number().int().min(1).max(1800).default(900),
@@ -182,19 +151,21 @@ function createServer(): McpServer {
     async ({ prompt, name, cwd, mode, timeoutSeconds, agent, model, effort }, ctx) => {
       const executable = await findAgy();
       if (!executable) return { content: [{ type: 'text', text: 'Antigravity CLI was not found. Run agy_check first.' }], isError: true };
-      const workspace = await resolveWorkspace(cwd);
-      if ('error' in workspace) return { content: [{ type: 'text', text: workspace.error }], isError: true };
-      const selection = await chooseModelAndEffort(ctx, executable, workspace.cwd, model, effort);
+      const resolvedCwd = path.resolve(cwd);
+      try { await access(resolvedCwd, constants.R_OK); } catch {
+        return { content: [{ type: 'text', text: `Workspace is not accessible: ${resolvedCwd}` }], isError: true };
+      }
+      const selection = await chooseModelAndEffort(ctx, executable, resolvedCwd, model, effort);
       if ('error' in selection) return { content: [{ type: 'text', text: selection.error }], isError: true };
       return await runtime.start({
         prompt,
         name,
-        cwd: workspace.cwd,
-        mode: mode as RunMode,
+        cwd: resolvedCwd,
+        mode,
         timeoutSeconds,
         agent,
         model: selection.model,
-        effort: selection.effort as Effort,
+        effort: selection.effort,
         signal: ctx.mcpReq.signal,
       });
     },
@@ -204,7 +175,7 @@ function createServer(): McpServer {
     'agy_followup',
     {
       title: 'Follow Up Antigravity Worker',
-      description: 'Send review feedback or a correction to an existing worker. Warm workers reuse the same process; recovered workers resume the exact conversation.',
+      description: 'Send review feedback to an existing managed worker, recovering its saved conversation after restart when necessary.',
       inputSchema: z.object({
         workerId: z.string().min(1),
         prompt: z.string().min(1).max(100_000),
@@ -212,23 +183,15 @@ function createServer(): McpServer {
       }),
       annotations: { readOnlyHint: false, openWorldHint: true, destructiveHint: true, idempotentHint: false },
     },
-    async ({ workerId, prompt, timeoutSeconds }, ctx) => runtime.followup({
-      workerId,
-      prompt,
-      timeoutSeconds,
-      signal: ctx.mcpReq.signal,
-    }),
+    async ({ workerId, prompt, timeoutSeconds }, ctx) => runtime.followup({ workerId, prompt, timeoutSeconds, signal: ctx.mcpReq.signal }),
   );
 
   server.registerTool(
     'agy_status',
     {
       title: 'Antigravity Worker Status',
-      description: 'Inspect one managed worker or list recoverable/active workers without reading prompt or response content.',
-      inputSchema: z.object({
-        workerId: z.string().min(1).optional(),
-        includeClosed: z.boolean().default(false),
-      }),
+      description: 'Inspect one managed worker or list persisted active/recoverable workers.',
+      inputSchema: z.object({ workerId: z.string().min(1).optional(), includeClosed: z.boolean().default(false) }),
       annotations: { readOnlyHint: true, openWorldHint: false, destructiveHint: false, idempotentHint: true },
     },
     async ({ workerId, includeClosed }) => runtime.status(workerId, includeClosed),
@@ -238,7 +201,7 @@ function createServer(): McpServer {
     'agy_cancel',
     {
       title: 'Cancel Antigravity Worker Turn',
-      description: 'Cancel the active turn for a managed worker while preserving its conversation for later recovery.',
+      description: 'Interrupt the active turn for a managed worker without deleting its recoverable Antigravity conversation.',
       inputSchema: z.object({ workerId: z.string().min(1) }),
       annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false, idempotentHint: true },
     },
@@ -249,16 +212,16 @@ function createServer(): McpServer {
     'agy_close',
     {
       title: 'Close Antigravity Worker',
-      description: 'Close a managed worker after review passes. Its ledger history and Antigravity conversation remain available for audit.',
+      description: 'Close a managed worker and retain its local ledger record plus Antigravity conversation for audit.',
       inputSchema: z.object({ workerId: z.string().min(1) }),
       annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false, idempotentHint: true },
     },
     async ({ workerId }) => runtime.close(workerId),
   );
 
-  void runtime.ensureRecovered();
   return server;
 }
 
-void serveStdio(createServer);
-console.error(`agy MCP server ${VERSION} running on stdio`);
+const server = await createServer();
+process.stderr.write(`agy MCP server ${VERSION} running on stdio\n`);
+await serveStdio(server);
