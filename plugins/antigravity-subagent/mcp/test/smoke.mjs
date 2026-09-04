@@ -94,11 +94,16 @@ try {
     assert.ok(['low', 'medium', 'high'].includes(started.structuredContent?.effort));
     assert.equal(typeof started.structuredContent?.model, 'string');
 
+    const streamingExpected = check.structuredContent.streaming.persistentDriver === true;
+    assert.equal(started.structuredContent?.transport, streamingExpected ? 'stream' : 'oneshot');
+    if (streamingExpected) assert.equal(typeof started.structuredContent?.driverPid, 'number');
+
     const pinnedEffort = started.structuredContent.model.match(/-(low|medium|high)$/i)?.[1]?.toLowerCase();
     if (pinnedEffort) assert.equal(pinnedEffort, started.structuredContent.effort);
 
     const workerId = started.structuredContent.workerId;
     const conversationId = started.structuredContent.conversationId;
+    const driverPid = started.structuredContent.driverPid;
     const followedUp = await client.callTool({
       name: 'agy_followup',
       arguments: {
@@ -111,6 +116,8 @@ try {
     assert.match(followedUp.content[0].text, /AGY_WORKER_RESUMED/);
     assert.equal(followedUp.structuredContent?.workerId, workerId);
     assert.equal(followedUp.structuredContent?.conversationId, conversationId);
+    assert.equal(followedUp.structuredContent?.transport, streamingExpected ? 'stream' : 'oneshot');
+    if (streamingExpected) assert.equal(followedUp.structuredContent?.driverPid, driverPid);
 
     const closed = await client.callTool({ name: 'agy_close', arguments: { workerId } });
     assertToolSucceeded('agy_close', closed);
