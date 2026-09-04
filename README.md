@@ -1,13 +1,13 @@
 # Antigravity Subagent for Codex
 
-[![CI](https://github.com/IlleJiViN/codex-antigravity-subagent/actions/workflows/ci.yml/badge.svg)](https://github.com/IlleJiViN/codex-antigravity-subagent/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/IlleJiViN/codex-antigravity-subagent)](https://github.com/IlleJiViN/codex-antigravity-subagent/releases)
+[![CI](https://github.com/vacnex/codex-antigravity-subagent/actions/workflows/ci.yml/badge.svg)](https://github.com/vacnex/codex-antigravity-subagent/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/vacnex/codex-antigravity-subagent)](https://github.com/vacnex/codex-antigravity-subagent/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Use your locally authenticated Google Antigravity CLI (`agy`) as an external delegated worker from Codex. Codex can start a bounded Antigravity task, review the resulting workspace changes, send corrections back into the same Antigravity conversation, and close that worker before starting the next plan step.
 
 > [!IMPORTANT]
-> This is an independent community project. It is not affiliated with or endorsed by Google, Antigravity, or OpenAI.
+> This is an independent community project. It is not affiliated with or endorsed by Google, Antigravity, or OpenAI. This fork is based on the original project by [IlleJiViN](https://github.com/IlleJiViN/codex-antigravity-subagent).
 
 ## What it adds
 
@@ -40,7 +40,7 @@ agy --version
 Run this once:
 
 ```powershell
-codex plugin marketplace add IlleJiViN/codex-antigravity-subagent --ref main
+codex plugin marketplace add vacnex/codex-antigravity-subagent --ref main
 ```
 
 The command is identical on Windows, macOS, and Linux.
