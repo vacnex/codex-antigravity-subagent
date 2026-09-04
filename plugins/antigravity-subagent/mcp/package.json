@@ -14,7 +14,8 @@
     "test:driver": "node test/driver.mjs",
     "test:store": "node test/store.mjs",
     "test:cli": "node test/cli.mjs",
-    "test:protocol": "npm run test:streaming && npm run test:cli && npm run test:driver && npm run test:store && node test/smoke.mjs --protocol-only",
+    "test:legacy": "node test/legacy-stdio.mjs",
+    "test:protocol": "npm run test:streaming && npm run test:cli && npm run test:driver && npm run test:store && npm run test:legacy && node test/smoke.mjs --protocol-only",
     "verify": "npm run check && npm run build && npm run test:protocol"
   },
   "dependencies": {
