@@ -23,9 +23,16 @@ export type WorkerLedgerTurn = {
 };
 
 type ToolResultLike = {
-  content: Array<{ type: string; text: string }>;
+  content: Array<{ type: 'text'; text: string }>;
   structuredContent: Record<string, unknown>;
   isError?: boolean;
+};
+
+type LedgerDecoratedResult = ToolResultLike & {
+  structuredContent: Record<string, unknown> & {
+    ledgerPersisted: boolean;
+    persistenceError?: string;
+  };
 };
 
 function errorText(error: unknown): string {
@@ -102,10 +109,10 @@ export class WorkerLedger {
   }
 }
 
-export function withLedgerStatus<T extends ToolResultLike>(
-  result: T,
+export function withLedgerStatus(
+  result: ToolResultLike,
   persistenceError?: string,
-): T & { structuredContent: Record<string, unknown> & { ledgerPersisted: boolean; persistenceError?: string } } {
+): LedgerDecoratedResult {
   const warning = persistenceError
     ? `\n\n[Warning: worker ledger update failed: ${persistenceError}]`
     : '';
