@@ -148,14 +148,18 @@ function runAgy(executable: string, args: string[], cwd: string, timeoutMs: numb
   });
 }
 
+function dedupeModelOptions(options: ModelOption[]): ModelOption[] {
+  const seen = new Set<string>();
+  return options.filter((option) => {
+    if (!option.slug || seen.has(option.slug)) return false;
+    seen.add(option.slug);
+    return true;
+  });
+}
+
 function collectModelOptions(value: unknown): ModelOption[] {
   const collected: ModelOption[] = [];
-
   const visit = (node: unknown): void => {
-    if (typeof node === 'string') {
-      if (/^[a-z0-9][a-z0-9._/-]*$/i.test(node)) collected.push({ slug: node, label: node });
-      return;
-    }
     if (Array.isArray(node)) {
       for (const item of node) visit(item);
       return;
@@ -163,43 +167,80 @@ function collectModelOptions(value: unknown): ModelOption[] {
     if (!node || typeof node !== 'object') return;
 
     const record = node as Record<string, unknown>;
-    const slugKeys = ['slug', 'id', 'value', 'model'];
-    const labelKeys = ['display_name', 'displayName', 'name', 'label', 'title'];
-    const slug = slugKeys.map((key) => record[key]).find((entry): entry is string => typeof entry === 'string' && entry.length > 0);
-    const label = labelKeys.map((key) => record[key]).find((entry): entry is string => typeof entry === 'string' && entry.length > 0);
+    const slug = ['slug', 'id', 'value', 'model']
+      .map((key) => record[key])
+      .find((entry): entry is string => typeof entry === 'string' && entry.length > 0);
+    const label = ['display_name', 'displayName', 'name', 'label', 'title']
+      .map((key) => record[key])
+      .find((entry): entry is string => typeof entry === 'string' && entry.length > 0);
     if (slug) collected.push({ slug, label: label ?? slug });
 
     for (const child of Object.values(record)) {
-      if (child !== slug && child !== label) visit(child);
+      if (Array.isArray(child) || (child && typeof child === 'object')) visit(child);
     }
   };
 
-  visit(value);
-  const seen = new Set<string>();
-  return collected.filter((option) => {
-    if (seen.has(option.slug)) return false;
-    seen.add(option.slug);
-    return true;
-  });
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      if (typeof item === 'string') collected.push({ slug: item, label: item });
+      else visit(item);
+    }
+  } else {
+    visit(value);
+  }
+  return dedupeModelOptions(collected);
+}
+
+function parseTextModelOptions(text: string): ModelOption[] {
+  const options: ModelOption[] = [];
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    const match = line.match(/^(\S+)\s{2,}(.+)$/);
+    if (match) {
+      options.push({ slug: match[1], label: match[2].trim() });
+      continue;
+    }
+    const firstToken = line.split(/\s+/)[0];
+    if (/^[a-z0-9][a-z0-9._/-]*$/i.test(firstToken) && firstToken.includes('-')) {
+      options.push({ slug: firstToken, label: line.slice(firstToken.length).trim() || firstToken });
+    }
+  }
+  return dedupeModelOptions(options);
 }
 
 async function listAgyModels(executable: string, cwd: string): Promise<ModelOption[]> {
-  const result = await runAgy(executable, ['models', '--output-format', 'json'], cwd, MODEL_LIST_TIMEOUT_MS);
-  if (result.timedOut || result.exitCode !== 0) {
-    const detail = result.stderr.trim() || result.stdout.trim() || 'unknown error';
-    throw new Error(`Could not list Antigravity models: ${detail}`);
+  const jsonAttempts = [
+    ['models', '--output-format', 'json'],
+    ['--output-format', 'json', 'models'],
+  ];
+  const failures: string[] = [];
+
+  for (const args of jsonAttempts) {
+    const result = await runAgy(executable, args, cwd, MODEL_LIST_TIMEOUT_MS);
+    if (!result.timedOut && result.exitCode === 0) {
+      try {
+        const models = collectModelOptions(JSON.parse(result.stdout));
+        if (models.length > 0) return models;
+        failures.push(`${args.join(' ')} returned an empty model catalog`);
+      } catch {
+        failures.push(`${args.join(' ')} returned invalid JSON`);
+      }
+    } else {
+      failures.push(result.stderr.trim() || `${args.join(' ')} failed with exit ${result.exitCode}`);
+    }
   }
 
-  let payload: unknown;
-  try {
-    payload = JSON.parse(result.stdout);
-  } catch {
-    throw new Error('Antigravity returned invalid JSON from `agy models --output-format json`.');
+  const plain = await runAgy(executable, ['models'], cwd, MODEL_LIST_TIMEOUT_MS);
+  if (!plain.timedOut && plain.exitCode === 0) {
+    const models = parseTextModelOptions(plain.stdout);
+    if (models.length > 0) return models;
+    failures.push('agy models returned no parseable entries');
+  } else {
+    failures.push(plain.stderr.trim() || `agy models failed with exit ${plain.exitCode}`);
   }
 
-  const models = collectModelOptions(payload);
-  if (models.length === 0) throw new Error('Antigravity returned no selectable models.');
-  return models;
+  throw new Error(`Could not list Antigravity models. ${failures.filter(Boolean).join(' | ')}`);
 }
 
 async function chooseModelAndEffort(
