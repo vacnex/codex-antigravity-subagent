@@ -104,6 +104,8 @@ try {
     const workerId = started.structuredContent.workerId;
     const conversationId = started.structuredContent.conversationId;
     const driverPid = started.structuredContent.driverPid;
+    const startTurns = started.structuredContent.numTurns;
+    const startUsage = started.structuredContent.usage?.total_tokens;
     const followedUp = await client.callTool({
       name: 'agy_followup',
       arguments: {
@@ -117,7 +119,15 @@ try {
     assert.equal(followedUp.structuredContent?.workerId, workerId);
     assert.equal(followedUp.structuredContent?.conversationId, conversationId);
     assert.equal(followedUp.structuredContent?.transport, streamingExpected ? 'stream' : 'oneshot');
-    if (streamingExpected) assert.equal(followedUp.structuredContent?.driverPid, driverPid);
+    if (streamingExpected) {
+      assert.equal(followedUp.structuredContent?.driverPid, driverPid);
+      if (typeof startTurns === 'number' && typeof followedUp.structuredContent?.numTurns === 'number') {
+        assert.ok(followedUp.structuredContent.numTurns > startTurns);
+      }
+      if (typeof startUsage === 'number' && typeof followedUp.structuredContent?.usage?.total_tokens === 'number') {
+        assert.ok(followedUp.structuredContent.usage.total_tokens >= startUsage);
+      }
+    }
 
     const closed = await client.callTool({ name: 'agy_close', arguments: { workerId } });
     assertToolSucceeded('agy_close', closed);
