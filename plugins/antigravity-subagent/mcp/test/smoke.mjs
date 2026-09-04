@@ -70,6 +70,13 @@ try {
     assert.equal(typeof check.structuredContent?.version, 'string');
     assert.ok(check.structuredContent?.modelCount > 0);
     assert.ok(check.structuredContent?.baseModelCount > 0);
+    assert.equal(typeof check.structuredContent?.streaming?.streamOutput, 'boolean');
+    assert.equal(typeof check.structuredContent?.streaming?.streamInput, 'boolean');
+    assert.equal(typeof check.structuredContent?.streaming?.persistentDriver, 'boolean');
+    assert.equal(
+      check.structuredContent.streaming.persistentDriver,
+      check.structuredContent.streaming.streamInput && check.structuredContent.streaming.streamOutput,
+    );
 
     const started = await client.callTool({
       name: 'agy_start',
