@@ -25,12 +25,24 @@ function assertToolSucceeded(name, result) {
 client.setRequestHandler('elicitation/create', async (request) => {
   if (request.params.mode !== 'form') return { action: 'decline' };
   const schema = request.params.requestedSchema;
-  const model = schema.properties?.model?.enum?.[0];
+  const models = schema.properties?.model?.enum ?? [];
+  const model = models[0];
+  let effort = 'medium';
+
+  if (typeof model === 'string') {
+    const pinned = model.match(/-(low|medium|high)$/i)?.[1]?.toLowerCase();
+    if (pinned && pinned !== effort) {
+      const family = model.slice(0, -(pinned.length + 1));
+      const sibling = models.find((candidate) => candidate.toLowerCase() === `${family}-${effort}`.toLowerCase());
+      if (!sibling) effort = pinned;
+    }
+  }
+
   return {
     action: 'accept',
     content: {
       ...(typeof model === 'string' ? { model } : {}),
-      effort: 'medium',
+      effort,
     },
   };
 });
@@ -68,7 +80,7 @@ try {
     assert.match(started.content[0].text, /AGY_WORKER_STARTED/);
     assert.equal(typeof started.structuredContent?.workerId, 'string');
     assert.equal(typeof started.structuredContent?.conversationId, 'string');
-    assert.equal(started.structuredContent?.effort, 'medium');
+    assert.ok(['low', 'medium', 'high'].includes(started.structuredContent?.effort));
     assert.equal(typeof started.structuredContent?.model, 'string');
 
     const workerId = started.structuredContent.workerId;
