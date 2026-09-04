@@ -50,6 +50,10 @@ export function buildAgyStreamUserMessage(prompt: string): string {
   });
 }
 
+/**
+ * Owns one warm Antigravity stream-json process.
+ * Exactly one user turn may be in flight at a time; the process remains alive between results.
+ */
 export class AgyPersistentDriver {
   private readonly child: ChildProcessWithoutNullStreams;
   private readonly maxDiagnosticBytes: number;
