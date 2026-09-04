@@ -31,6 +31,13 @@ jobs:
       - name: Build bundled server
         working-directory: plugins/antigravity-subagent/mcp
         run: npm run build
+      - name: Upload generated MCP bundle
+        if: matrix.node-version == 20
+        uses: actions/upload-artifact@v4
+        with:
+          name: agy-mcp-dist
+          path: plugins/antigravity-subagent/mcp/dist/server.cjs
+          if-no-files-found: error
       - name: Test MCP protocol
         working-directory: plugins/antigravity-subagent/mcp
         run: npm run test:protocol
