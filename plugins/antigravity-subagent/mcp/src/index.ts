@@ -17,7 +17,7 @@ import {
 } from './cli.js';
 import { WorkerRuntime, type RuntimeToolResult } from './runtime.js';
 
-const VERSION = '0.4.1';
+const VERSION = '0.4.2';
 const WAIT_POLL_MS = 1_000;
 
 function isRunningResult(result: RuntimeToolResult): boolean {
