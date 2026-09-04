@@ -8,7 +8,7 @@ import { McpServer, type ServerContext } from '@modelcontextprotocol/server';
 import { serveStdio } from '@modelcontextprotocol/server/stdio';
 import * as z from 'zod/v4';
 
-const VERSION = '0.2.0';
+const VERSION = '0.3.0';
 const MAX_STDOUT_BYTES = 2 * 1024 * 1024;
 const MAX_STDERR_BYTES = 8 * 1024;
 const MAX_RESPONSE_BYTES = 64 * 1024;
