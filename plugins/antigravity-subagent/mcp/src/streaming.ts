@@ -162,11 +162,13 @@ export function parseAgyStreamLine(line: string): AgyStreamEvent | undefined {
 
 /**
  * Detect the streaming surfaces exposed by `agy --help`.
- * Persistent stdin driving requires both stream input and stream output support.
+ * The presence of stream input implies stream-json output on supported AGY versions,
+ * because the CLI requires both modes to be paired for persistent stdin sessions.
  */
 export function detectAgyStreamingCapabilities(helpText: string): AgyStreamingCapabilities {
   const streamInput = helpText.includes('--input-format');
-  const streamOutput = helpText.includes('--output-format') && helpText.includes('stream-json');
+  const streamOutput = helpText.includes('--output-format')
+    && (helpText.includes('stream-json') || streamInput);
   return {
     streamOutput,
     streamInput,
