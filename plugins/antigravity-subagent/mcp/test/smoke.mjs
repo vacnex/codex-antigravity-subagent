@@ -66,6 +66,10 @@ try {
     const check = await client.callTool({ name: 'agy_check', arguments: {} });
     assertToolSucceeded('agy_check', check);
     assert.match(check.content[0].text, /Antigravity CLI is available at:/);
+    assert.equal(check.structuredContent?.compatible, true);
+    assert.equal(typeof check.structuredContent?.version, 'string');
+    assert.ok(check.structuredContent?.modelCount > 0);
+    assert.ok(check.structuredContent?.baseModelCount > 0);
 
     const started = await client.callTool({
       name: 'agy_start',
@@ -82,6 +86,9 @@ try {
     assert.equal(typeof started.structuredContent?.conversationId, 'string');
     assert.ok(['low', 'medium', 'high'].includes(started.structuredContent?.effort));
     assert.equal(typeof started.structuredContent?.model, 'string');
+
+    const pinnedEffort = started.structuredContent.model.match(/-(low|medium|high)$/i)?.[1]?.toLowerCase();
+    if (pinnedEffort) assert.equal(pinnedEffort, started.structuredContent.effort);
 
     const workerId = started.structuredContent.workerId;
     const conversationId = started.structuredContent.conversationId;
