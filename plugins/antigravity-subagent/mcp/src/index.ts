@@ -154,10 +154,8 @@ async function createServer(): Promise<McpServer> {
       try { await access(resolvedCwd, constants.R_OK); } catch {
         return { content: [{ type: 'text', text: `Workspace is not accessible: ${resolvedCwd}` }], isError: true };
       }
-
       const reused = await runtime.reuseExistingStart({ name, cwd: resolvedCwd, idempotencyKey });
       if (reused) return reused;
-
       const executable = await findAgy();
       if (!executable) return { content: [{ type: 'text', text: 'Antigravity CLI was not found. Run agy_check first.' }], isError: true };
       const selection = await chooseModelAndEffort(ctx, executable, resolvedCwd, model, effort);
