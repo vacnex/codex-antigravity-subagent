@@ -161,11 +161,6 @@ function executionOptions(worker: WorkerState): WorkerExecutionOptions {
   return { cwd: worker.cwd, mode: worker.mode, agent: worker.agent, model: worker.model, effort: worker.effort };
 }
 
-function combineWarnings(...values: Array<string | undefined>): string | undefined {
-  const warnings = values.filter((value): value is string => Boolean(value));
-  return warnings.length > 0 ? warnings.join(' | ') : undefined;
-}
-
 function cloneResult(result: RuntimeToolResult): RuntimeToolResult {
   return {
     content: result.content.map((entry) => ({ ...entry })),
@@ -213,10 +208,22 @@ export class WorkerRuntime {
       for (const record of records) {
         const worker = workerFromRecord(record);
         if (!worker || this.workers.has(worker.workerId)) continue;
-        this.workers.set(worker.workerId, worker);
 
-        // A persisted running turn cannot still be owned by this freshly started MCP process.
-        // Mark it interrupted immediately so status/result never lie about a ghost running turn.
+        const activeLease = (record.state === 'running' || record.activeTurnKind)
+          ? await this.store.readActiveLease(record.workerId)
+          : undefined;
+        if (activeLease) {
+          // Another live MCP process still owns this running worker. Keep the logical state visible
+          // as running, but never mutate its ledger or attempt to recover it from this process.
+          worker.state = 'running';
+          worker.recovered = true;
+          this.workers.set(worker.workerId, worker);
+          continue;
+        }
+
+        this.workers.set(worker.workerId, worker);
+        // A persisted running turn with no live lease cannot still be executing under a managed
+        // owner. Mark it interrupted immediately so status/result never report a ghost process.
         if (record.state === 'running' || record.activeTurnKind) {
           const now = new Date().toISOString();
           worker.state = 'recoverable';
@@ -524,9 +531,13 @@ export class WorkerRuntime {
     const worker = this.workers.get(record.workerId);
     const driver = this.drivers.get(record.workerId);
     const active = this.activeTurns.get(record.workerId);
+    const activeLease = await this.store.readActiveLease(record.workerId);
+    if (worker?.recovered && !active && !driver?.isBusy && !(record.state === 'running' && activeLease)) {
+      worker.state = 'recoverable';
+    }
     const state: WorkerLifecycleState = record.closedAt
       ? 'closed'
-      : active || driver?.isBusy
+      : active || driver?.isBusy || (record.state === 'running' && Boolean(activeLease))
         ? 'running'
         : worker?.state ?? 'recoverable';
     const duplicateWorkerIds = matches.slice(1).map((item) => item.workerId);
@@ -1000,6 +1011,33 @@ export class WorkerRuntime {
 
     const record = await this.store.read(workerId).catch(() => undefined);
     if (!record) return textError(`Unknown Antigravity worker: ${workerId}.`, { workerId });
+    const activeLease = await this.store.readActiveLease(workerId);
+    const runningElsewhere = record.state === 'running' && Boolean(activeLease);
+    if (runningElsewhere) {
+      return {
+        content: [{ type: 'text', text: `${record.name ?? workerId} is still running under another MCP process.` }],
+        structuredContent: {
+          workerId: record.workerId,
+          conversationId: record.conversationId,
+          name: record.name,
+          idempotencyKey: record.idempotencyKey,
+          state: 'running',
+          status: 'RUNNING',
+          model: record.model,
+          effort: record.effort,
+          mode: record.mode,
+          cwd: record.cwd,
+          activeTurnKind: record.activeTurnKind,
+          activeTurnKey: record.activeTurnKey,
+          activeTurnStartedAt: record.activeTurnStartedAt,
+          background: true,
+          done: false,
+          resultAvailable: false,
+        },
+      };
+    }
+
+    if (worker?.recovered) worker.state = 'recoverable';
     const state: WorkerLifecycleState = record.closedAt ? 'closed' : worker?.state ?? 'recoverable';
     const done = state !== 'running';
     return {
@@ -1039,6 +1077,16 @@ export class WorkerRuntime {
     if (!worker) return textError(`Unknown or closed Antigravity worker: ${workerId}.`, { workerId });
     const active = this.activeTurns.get(workerId);
     if (!active) {
+      const activeLease = await this.store.readActiveLease(workerId);
+      const record = await this.store.read(workerId).catch(() => undefined);
+      if (record?.state === 'running' && activeLease) {
+        return textError(`Worker ${workerId} is running under MCP process ${activeLease.processPid}; cancel it from the owning MCP process.`, {
+          workerId,
+          conversationId: worker.conversationId,
+          state: 'running',
+          leaseOwnerPid: activeLease.processPid,
+        });
+      }
       return {
         content: [{ type: 'text', text: `Worker ${workerId} has no turn in progress.` }],
         structuredContent: { workerId, conversationId: worker.conversationId, canceled: false, state: worker.state },
@@ -1137,10 +1185,13 @@ export class WorkerRuntime {
       const runtime = this.workers.get(record.workerId);
       const driver = this.drivers.get(record.workerId);
       const active = this.activeTurns.get(record.workerId);
-      const lease = await this.store.readLease(record.workerId);
+      const lease = await this.store.readActiveLease(record.workerId);
+      if (runtime?.recovered && !active && !driver?.isBusy && !(record.state === 'running' && lease)) {
+        runtime.state = 'recoverable';
+      }
       const state: WorkerLifecycleState = record.closedAt
         ? 'closed'
-        : active || driver?.isBusy
+        : active || driver?.isBusy || (record.state === 'running' && Boolean(lease))
           ? 'running'
           : runtime?.state ?? 'recoverable';
       const identity = record.idempotencyKey
