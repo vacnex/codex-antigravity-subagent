@@ -222,6 +222,5 @@ async function createServer(): Promise<McpServer> {
   return server;
 }
 
-const server = await createServer();
 process.stderr.write(`agy MCP server ${VERSION} running on stdio\n`);
-await serveStdio(server);
+await serveStdio(() => createServer());
