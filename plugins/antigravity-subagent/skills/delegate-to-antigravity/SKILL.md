@@ -12,19 +12,37 @@ Treat Antigravity as an external delegated worker. It is not a native Codex coll
 Prefer managed workers for implementation or any task likely to need review corrections:
 
 1. Establish availability with `agy_check` and require a compatible Antigravity CLI capability report before managed work.
-2. Start a new bounded task with `agy_start`.
+2. Start each bounded plan step with `agy_start`. Pass a short friendly `name` that identifies the plan step, for example `Plan 2 - persistence layer`.
 3. Unless both values were supplied explicitly, let the MCP client ask the user to choose the Antigravity base model and reasoning effort. Do not silently invent either choice.
-4. Keep the returned `workerId` and `conversationId`. The conversation ID is an Antigravity conversation that remains available for manual inspection and resume.
+4. Keep the returned `workerId` and `conversationId`. The worker is persisted locally and the Antigravity conversation remains available for manual inspection and resume.
 5. Inspect the workspace diff and run relevant tests independently.
 6. If review fails, call `agy_followup` with the same `workerId` and concrete correction instructions. Repeat review and follow-up until the work passes.
-7. Call `agy_close` only after the worker passes review. Closing forgets the MCP worker mapping; it does not delete the Antigravity conversation.
-8. For a distinct plan step, start a new worker rather than reusing the previous worker's context.
+7. Use `agy_status` when the current worker state is uncertain, especially after a Codex/MCP restart. A persisted open worker may be reported as `recoverable`; `agy_followup` will resume its exact `conversationId`.
+8. If the user cancels the current work or a turn is no longer useful, use `agy_cancel`. Cancellation stops the active turn but keeps the conversation recoverable. Do not treat cancellation as worker deletion.
+9. Call `agy_close` only after the worker passes review. Closing marks the worker closed in the local ledger; it does not delete the Antigravity conversation or its audit history.
+10. For a distinct plan step, start a new worker rather than reusing the previous worker's context.
 
 For sequential multi-step plans, use one Antigravity worker per plan step. Finish the review/fix loop for the current step before starting the next one unless the user explicitly requests parallel work.
 
+## Persistence and recovery
+
+Managed workers persist metadata outside the plugin installation directory, under `$CODEX_HOME/antigravity-subagent/workers` by default. `AGY_MCP_STATE_DIR` can override the location. The ledger stores worker identity, conversation ID, friendly name, workspace, model/effort/mode, lifecycle timestamps, transport details, and usage metadata. It must not store prompts, responses, source code, or tool output.
+
+A warm worker uses Antigravity persistent `stream-json` input/output when the installed CLI supports it. Multiple successful follow-ups reuse the same AGY process. If Codex/MCP restarts or the warm process is lost, the worker becomes recoverable; the next follow-up starts a new AGY process with the exact persisted `--conversation <id>`.
+
+A cross-process worker lease prevents two MCP instances from driving the same worker concurrently. Do not work around a lease conflict by starting another follow-up against the same conversation. Use `agy_status` to inspect the worker instead.
+
+Idle warm processes may be released automatically while the logical worker remains recoverable. This is normal and does not close the worker.
+
+## Status and cancellation
+
+`agy_status` with a `workerId` returns lifecycle information for one worker. Without a worker ID it lists open workers; `includeClosed=true` also includes ledger history. Status metadata may include whether the worker is warm, the active driver PID, lease state, last result status, turn count, and session/turn usage.
+
+`agy_cancel` targets only an active turn. After cancellation the worker should remain available for a later `agy_followup`. MCP request cancellation is also propagated to the underlying AGY invocation; user Stop actions must not be ignored or converted into worker closure.
+
 ## One-shot delegation
 
-Use `agy_delegate` for bounded research, second opinions, or work that does not need a follow-up session. It remains a one-shot compatibility tool.
+Use `agy_delegate` for bounded research, second opinions, or work that does not need a follow-up session. It remains a one-shot compatibility tool and honors MCP request cancellation.
 
 ## Model and effort selection
 
@@ -38,15 +56,21 @@ Do not ask for model or effort again on `agy_followup`; the existing worker keep
 
 ## Managed result handling
 
-Managed workers request Antigravity JSON output and return a compact response plus structured metadata. Preserve useful metadata such as status, duration, number of turns, and token usage, but do not dump Antigravity progress diagnostics into Codex context on successful runs.
+Managed workers return a compact response plus structured metadata. Preserve useful metadata such as status, lifecycle state, duration, number of turns, transport, and token usage, but do not dump Antigravity progress diagnostics into Codex context on successful runs.
 
-The MCP server caps the returned model response and diagnostics. Codex can inspect the shared workspace and diff directly, so the Antigravity handoff should stay concise rather than reproducing large file contents or full diffs.
+Persistent stream results report cumulative session usage. The MCP layer also computes `turnUsage` as the delta from the previous persisted usage snapshot and preserves cumulative values as `sessionUsage` (and the backward-compatible `usage` field).
+
+Stream step updates are summarized as counts for observability rather than copying text deltas, tool payloads, or subagent output into Codex context. Codex can inspect the shared workspace and diff directly, so the handoff should remain concise.
+
+CLI discovery, capability probes, and model catalogs use short-lived caches. `agy_check` accepts `refresh=true` when a fresh capability/model probe is explicitly needed.
 
 ## Auditing Antigravity sessions
 
 Managed workers retain the returned Antigravity conversation ID. After delegation, the user can inspect the same Antigravity conversation manually from the workspace with interactive `agy` and `/resume`, or resume a known conversation directly with `agy --conversation <conversation-id>`.
 
-Treat this as an audit trail of the conversation and visible agent/tool activity that Antigravity stores. Do not describe it as access to hidden model chain-of-thought.
+The local friendly worker name is guaranteed in the plugin ledger. Antigravity may generate its own native conversation title; do not attempt unsupported headless slash-command hacks merely to force that title to match the ledger name.
+
+Treat the persisted worker metadata and AGY conversation as an audit trail of visible conversation/tool activity. Do not describe either as access to hidden model chain-of-thought.
 
 ## Bundled runner
 
@@ -60,7 +84,7 @@ node <skill-dir>/scripts/agy-delegate.mjs --cwd <absolute-workspace> --mode plan
 
 To resume a known Antigravity conversation through the fallback runner, add `--conversation <conversation-id>`.
 
-The runner accepts `--output-format text|json`, `--timeout-seconds 1..1800`, `--agent`, `--model`, `--effort`, and `--conversation`. It avoids passing a duplicate `--effort` flag when the chosen model slug already pins the effort. The runner cannot provide the MCP picker, so select model and effort explicitly when they matter.
+The runner accepts `--output-format text|json`, `--timeout-seconds 1..1800`, `--agent`, `--model`, `--effort`, and `--conversation`. It avoids passing a duplicate `--effort` flag when the chosen model slug already pins the effort. The fallback runner does not provide the managed worker registry, leases, status/cancel tools, or MCP picker.
 
 Delete the temporary prompt file after the runner finishes. Do not add or emulate dangerous permission-bypass flags.
 
