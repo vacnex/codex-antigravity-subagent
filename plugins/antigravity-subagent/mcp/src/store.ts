@@ -111,8 +111,9 @@ export class WorkerStore {
   }
 
   async write(record: WorkerLedgerRecord): Promise<void> {
-    if (!isWorkerLedgerRecord(record)) {
-      throw new Error(`Refusing to persist invalid Antigravity worker ledger record: ${record.workerId ?? 'unknown'}`);
+    const candidate: unknown = record;
+    if (!isWorkerLedgerRecord(candidate)) {
+      throw new Error('Refusing to persist invalid Antigravity worker ledger record.');
     }
     assertWorkerId(record.workerId);
     await mkdir(this.rootDir, { recursive: true });
