@@ -212,7 +212,32 @@ export class WorkerRuntime {
       this.recoveryWarnings = warnings;
       for (const record of records) {
         const worker = workerFromRecord(record);
-        if (worker && !this.workers.has(worker.workerId)) this.workers.set(worker.workerId, worker);
+        if (!worker || this.workers.has(worker.workerId)) continue;
+        this.workers.set(worker.workerId, worker);
+
+        // A persisted running turn cannot still be owned by this freshly started MCP process.
+        // Mark it interrupted immediately so status/result never lie about a ghost running turn.
+        if (record.state === 'running' || record.activeTurnKind) {
+          const now = new Date().toISOString();
+          worker.state = 'recoverable';
+          worker.recovered = true;
+          worker.lastActivityAt = now;
+          const persistenceError = await this.persist(worker, {
+            state: 'recoverable',
+            activeTurnKind: undefined,
+            activeTurnKey: undefined,
+            activeTurnStartedAt: undefined,
+            lastTurnKind: record.activeTurnKind ?? record.lastTurnKind,
+            lastTurnKey: record.activeTurnKey ?? record.lastTurnKey,
+            lastTurnCompletedAt: now,
+            lastResultStatus: record.lastResultStatus === 'RUNNING' || !record.lastResultStatus
+              ? 'INTERRUPTED'
+              : record.lastResultStatus,
+            lastDriverPid: undefined,
+            lastError: record.lastError ?? 'MCP restarted while the Antigravity turn was active',
+          });
+          if (persistenceError) this.recoveryWarnings.push(persistenceError);
+        }
       }
     } catch (error) {
       this.recoveryWarnings = [error instanceof Error ? error.message : String(error)];
@@ -366,7 +391,7 @@ export class WorkerRuntime {
         conversationId: event?.conversationId ?? worker.conversationId,
         name: worker.name,
         idempotencyKey: worker.idempotencyKey,
-        status: event?.status ?? (turn.canceled ? 'CANCELED' : turn.timedOut ? 'ERROR' : 'ERROR'),
+        status: event?.status ?? (turn.canceled ? 'CANCELED' : 'ERROR'),
         state: worker.state,
         model: worker.model,
         effort: worker.effort,
@@ -554,6 +579,9 @@ export class WorkerRuntime {
     if (!driver.isAlive) this.drivers.delete(worker.workerId);
 
     const resultStatus = turn.result?.status ?? (turn.canceled ? 'CANCELED' : 'ERROR');
+    const lastError = resultStatus === 'SUCCESS'
+      ? undefined
+      : ((turn.result?.error ?? turn.stderr) || undefined);
     const persistenceError = await this.persist(worker, {
       state: worker.state,
       activeTurnKind: undefined,
@@ -571,7 +599,7 @@ export class WorkerRuntime {
       lastTurnUsage: usageDelta(worker.lastUsage, active.previousUsage),
       lastTimedOut: turn.timedOut,
       lastCanceled: turn.canceled,
-      lastError: resultStatus === 'SUCCESS' ? undefined : turn.result?.error ?? turn.stderr || undefined,
+      lastError,
     });
     this.activeTurns.delete(worker.workerId);
     if (!driver.isAlive) await this.releaseLease(worker.workerId);
@@ -594,6 +622,9 @@ export class WorkerRuntime {
     worker.state = result.timedOut || result.canceled ? 'recoverable' : 'ready';
     worker.recovered = result.timedOut || result.canceled;
     const resultStatus = envelope?.status ?? (result.canceled ? 'CANCELED' : result.exitCode === 0 ? 'SUCCESS' : 'ERROR');
+    const lastError = resultStatus === 'SUCCESS'
+      ? undefined
+      : ((envelope?.error ?? result.stderr.trim()) || undefined);
     const persistenceError = await this.persist(worker, {
       state: worker.state,
       activeTurnKind: undefined,
@@ -611,7 +642,7 @@ export class WorkerRuntime {
       lastTurnUsage: usageDelta(worker.lastUsage, active.previousUsage),
       lastTimedOut: result.timedOut,
       lastCanceled: result.canceled,
-      lastError: resultStatus === 'SUCCESS' ? undefined : envelope?.error ?? result.stderr.trim() || undefined,
+      lastError,
     });
     this.activeOneShots.delete(worker.workerId);
     this.activeTurns.delete(worker.workerId);
@@ -668,6 +699,7 @@ export class WorkerRuntime {
 
     const executable = await findAgy();
     if (!executable) return textError('Antigravity CLI was not found. Run agy_check first.');
+    if (input.signal?.aborted) return textError('Antigravity start was canceled before launch.');
 
     const workerId = `agy_${randomUUID()}`;
     const now = new Date().toISOString();
@@ -695,8 +727,7 @@ export class WorkerRuntime {
       this.drivers.set(workerId, driver);
       try {
         const init = await driver.waitForInit(DRIVER_INIT_TIMEOUT_MS, input.signal);
-        if (!init) {
-          if (driver.isBusy) await driver.cancelCurrentTurn().catch(() => false);
+        if (!init || input.signal?.aborted) {
           await driver.close().catch(() => undefined);
           this.drivers.delete(workerId);
           await this.releaseLease(workerId);
@@ -704,6 +735,7 @@ export class WorkerRuntime {
             ? 'Antigravity start was canceled before the stream handshake completed.'
             : `Antigravity stream did not initialize within ${DRIVER_INIT_TIMEOUT_MS / 1000} seconds.`);
         }
+
         worker.conversationId = init.conversationId;
         this.workers.set(workerId, worker);
         const active: ActiveTurn = {
@@ -736,19 +768,15 @@ export class WorkerRuntime {
           return textError(`Failed to persist Antigravity worker before launch: ${persistenceError}`, { workerId, conversationId: worker.conversationId });
         }
 
-        let turnPromise: Promise<AgyDriverTurnResult>;
-        try {
-          turnPromise = driver.send(input.prompt, input.timeoutSeconds * 1000);
-        } catch (error) {
-          return await this.failLaunch(worker, driver, active, error);
-        }
         this.activeTurns.set(workerId, active);
         this.completedResults.delete(workerId);
+        const turnPromise = driver.send(input.prompt, input.timeoutSeconds * 1000);
         void turnPromise
           .then((turn) => this.finishStreamTurn(worker, driver, turn, active))
           .catch((error) => this.finishTurnFailure(worker, active, error));
         return this.runningResult(worker, 'stream');
       } catch (error) {
+        this.activeTurns.delete(workerId);
         this.closing.add(workerId);
         if (driver.isBusy) await driver.cancelCurrentTurn().catch(() => false);
         await driver.close().catch(() => undefined);
@@ -802,49 +830,14 @@ export class WorkerRuntime {
     return final;
   }
 
-  private async failLaunch(
-    worker: WorkerState,
-    driver: AgyPersistentDriver,
-    active: ActiveTurn,
-    error: unknown,
-  ): Promise<RuntimeToolResult> {
-    const message = error instanceof Error ? error.message : String(error);
-    worker.state = 'recoverable';
-    worker.recovered = true;
-    worker.lastActivityAt = new Date().toISOString();
-    const persistenceError = await this.persist(worker, {
-      state: 'recoverable',
-      activeTurnKind: undefined,
-      activeTurnKey: undefined,
-      activeTurnStartedAt: undefined,
-      lastTurnKind: active.kind,
-      lastTurnKey: active.key,
-      lastTurnCompletedAt: new Date().toISOString(),
-      lastResultStatus: 'ERROR',
-      lastDriverPid: undefined,
-      lastError: message,
-    });
-    this.closing.add(worker.workerId);
-    await driver.close().catch(() => undefined);
-    this.closing.delete(worker.workerId);
-    this.drivers.delete(worker.workerId);
-    await this.releaseLease(worker.workerId);
-    return this.decoratePersistence(textError(`Failed to launch Antigravity turn: ${message}`, {
-      workerId: worker.workerId,
-      conversationId: worker.conversationId,
-      state: worker.state,
-    }), persistenceError);
-  }
-
   async followup(input: WorkerFollowupInput): Promise<RuntimeToolResult> {
     await this.ensureRecovered();
     const worker = this.workers.get(input.workerId);
     if (!worker) return textError(`Unknown or closed Antigravity worker: ${input.workerId}.`, { workerId: input.workerId });
     if (this.activeTurns.has(worker.workerId)) {
       const active = this.activeTurns.get(worker.workerId)!;
-      if (normalizeKey(input.idempotencyKey) && normalizeKey(input.idempotencyKey) === active.key) {
-        return this.runningResult(worker, active.transport, true);
-      }
+      const retryKey = normalizeKey(input.idempotencyKey);
+      if (retryKey && retryKey === active.key) return this.runningResult(worker, active.transport, true);
       return textError(`Antigravity worker ${worker.workerId} already has a turn in progress.`, { workerId: worker.workerId, state: 'running' });
     }
 
@@ -860,6 +853,7 @@ export class WorkerRuntime {
 
     const executable = await findAgy();
     if (!executable) return textError('Antigravity CLI was not found. Run agy_check first.', { workerId: worker.workerId });
+    if (input.signal?.aborted) return textError('Antigravity follow-up was canceled before launch.', { workerId: worker.workerId });
 
     let driver = this.drivers.get(worker.workerId);
     if (driver && !driver.isAlive) {
@@ -887,7 +881,7 @@ export class WorkerRuntime {
         driver = this.createDriver(worker, executable, true);
         this.drivers.set(worker.workerId, driver);
         const init = await driver.waitForInit(DRIVER_INIT_TIMEOUT_MS, input.signal);
-        if (!init) {
+        if (!init || input.signal?.aborted) {
           await driver.close().catch(() => undefined);
           this.drivers.delete(worker.workerId);
           await this.releaseLease(worker.workerId);
@@ -937,9 +931,10 @@ export class WorkerRuntime {
       this.completedResults.delete(worker.workerId);
 
       if (driver) {
-        const turnPromise = driver.send(input.prompt, input.timeoutSeconds * 1000);
+        const streamDriver = driver;
+        const turnPromise = streamDriver.send(input.prompt, input.timeoutSeconds * 1000);
         void turnPromise
-          .then((turn) => this.finishStreamTurn(worker, driver!, turn, active))
+          .then((turn) => this.finishStreamTurn(worker, streamDriver, turn, active))
           .catch((error) => this.finishTurnFailure(worker, active, error));
         return this.runningResult(worker, 'stream');
       }
@@ -954,7 +949,7 @@ export class WorkerRuntime {
         { signal: controller.signal },
       );
       void promise
-        .then((result) => this.finishOneShotTurn(worker, result, active))
+        .then((oneShotResult) => this.finishOneShotTurn(worker, oneShotResult, active))
         .catch((error) => this.finishTurnFailure(worker, active, error));
       return this.runningResult(worker, 'oneshot');
     } catch (error) {
@@ -971,7 +966,15 @@ export class WorkerRuntime {
       worker.state = 'recoverable';
       worker.recovered = true;
       worker.lastActivityAt = new Date().toISOString();
-      await this.persist(worker, { state: 'recoverable', activeTurnKind: undefined, activeTurnKey: undefined, activeTurnStartedAt: undefined, lastResultStatus: 'ERROR', lastDriverPid: undefined, lastError: error instanceof Error ? error.message : String(error) });
+      await this.persist(worker, {
+        state: 'recoverable',
+        activeTurnKind: undefined,
+        activeTurnKey: undefined,
+        activeTurnStartedAt: undefined,
+        lastResultStatus: 'ERROR',
+        lastDriverPid: undefined,
+        lastError: error instanceof Error ? error.message : String(error),
+      });
       await this.releaseLease(worker.workerId);
       return textError(`Failed to resume Antigravity worker: ${error instanceof Error ? error.message : String(error)}`, {
         workerId: worker.workerId,
@@ -1049,7 +1052,7 @@ export class WorkerRuntime {
         content: [{ type: 'text', text: canceled
           ? `Cancellation requested for ${workerId}. The conversation remains recoverable.`
           : `No active stream turn for ${workerId}.` }],
-        structuredContent: { workerId, conversationId: worker.conversationId, canceled, cancellationRequested: canceled, state: 'running' },
+        structuredContent: { workerId, conversationId: worker.conversationId, canceled, cancellationRequested: canceled, state: worker.state },
       };
     }
 
@@ -1058,7 +1061,7 @@ export class WorkerRuntime {
       oneShot.controller.abort(new Error('Canceled by agy_cancel'));
       return {
         content: [{ type: 'text', text: `Cancellation requested for ${workerId}. The conversation remains recoverable.` }],
-        structuredContent: { workerId, conversationId: worker.conversationId, canceled: true, cancellationRequested: true, state: 'running' },
+        structuredContent: { workerId, conversationId: worker.conversationId, canceled: true, cancellationRequested: true, state: worker.state },
       };
     }
 
@@ -1095,7 +1098,14 @@ export class WorkerRuntime {
       worker.state = 'closed';
       worker.lastActivityAt = new Date().toISOString();
       const closedAt = new Date().toISOString();
-      const persistenceError = await this.persist(worker, { state: 'closed', closedAt, lastDriverPid: undefined, activeTurnKind: undefined, activeTurnKey: undefined, activeTurnStartedAt: undefined });
+      const persistenceError = await this.persist(worker, {
+        state: 'closed',
+        closedAt,
+        lastDriverPid: undefined,
+        activeTurnKind: undefined,
+        activeTurnKey: undefined,
+        activeTurnStartedAt: undefined,
+      });
       this.workers.delete(workerId);
       this.completedResults.delete(workerId);
       await this.releaseLease(workerId);
