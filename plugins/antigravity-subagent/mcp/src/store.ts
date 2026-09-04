@@ -7,12 +7,14 @@ import type { AgyUsage } from './streaming.js';
 
 export type WorkerLedgerTransport = 'stream' | 'oneshot';
 export type WorkerLifecycleState = 'ready' | 'running' | 'recoverable' | 'closed' | 'error';
+export type WorkerTurnKind = 'start' | 'followup';
 
 export type WorkerLedgerRecord = {
   schemaVersion: 1;
   workerId: string;
   conversationId: string;
   name?: string;
+  idempotencyKey?: string;
   cwd: string;
   mode: string;
   agent?: string;
@@ -23,6 +25,12 @@ export type WorkerLedgerRecord = {
   lastActivityAt?: string;
   closedAt?: string;
   state?: WorkerLifecycleState;
+  activeTurnKind?: WorkerTurnKind;
+  activeTurnKey?: string;
+  activeTurnStartedAt?: string;
+  lastTurnKind?: WorkerTurnKind;
+  lastTurnKey?: string;
+  lastTurnCompletedAt?: string;
   lastTransport?: WorkerLedgerTransport;
   lastDriverPid?: number;
   lastResultStatus?: string;
@@ -32,6 +40,7 @@ export type WorkerLedgerRecord = {
   lastTurnUsage?: AgyUsage;
   lastTimedOut?: boolean;
   lastCanceled?: boolean;
+  lastError?: string;
 };
 
 export type WorkerLeaseRecord = {
@@ -81,11 +90,15 @@ function isLifecycleState(value: unknown): value is WorkerLifecycleState | undef
   return value === undefined || ['ready', 'running', 'recoverable', 'closed', 'error'].includes(String(value));
 }
 
+function isTurnKind(value: unknown): value is WorkerTurnKind | undefined {
+  return value === undefined || value === 'start' || value === 'followup';
+}
+
 export function isWorkerLedgerRecord(value: unknown): value is WorkerLedgerRecord {
   if (!isRecord(value) || value.schemaVersion !== 1) return false;
   if (typeof value.workerId !== 'string' || !value.workerId) return false;
   if (typeof value.conversationId !== 'string' || !value.conversationId) return false;
-  if (!optionalString(value.name)) return false;
+  if (!optionalString(value.name) || !optionalString(value.idempotencyKey)) return false;
   if (typeof value.cwd !== 'string' || !value.cwd) return false;
   if (typeof value.mode !== 'string' || !value.mode) return false;
   if (!optionalString(value.agent)) return false;
@@ -95,12 +108,16 @@ export function isWorkerLedgerRecord(value: unknown): value is WorkerLedgerRecor
   if (typeof value.updatedAt !== 'string' || !value.updatedAt) return false;
   if (!optionalString(value.lastActivityAt) || !optionalString(value.closedAt)) return false;
   if (!isLifecycleState(value.state)) return false;
+  if (!isTurnKind(value.activeTurnKind) || !isTurnKind(value.lastTurnKind)) return false;
+  if (!optionalString(value.activeTurnKey) || !optionalString(value.activeTurnStartedAt)) return false;
+  if (!optionalString(value.lastTurnKey) || !optionalString(value.lastTurnCompletedAt)) return false;
   if (value.lastTransport !== undefined && value.lastTransport !== 'stream' && value.lastTransport !== 'oneshot') return false;
   if (!optionalNumber(value.lastDriverPid)) return false;
   if (!optionalString(value.lastResultStatus)) return false;
   if (!optionalNumber(value.lastDurationSeconds) || !optionalNumber(value.lastNumTurns)) return false;
   if (!isUsage(value.lastUsage) || !isUsage(value.lastTurnUsage)) return false;
   if (!optionalBoolean(value.lastTimedOut) || !optionalBoolean(value.lastCanceled)) return false;
+  if (!optionalString(value.lastError)) return false;
   return true;
 }
 
