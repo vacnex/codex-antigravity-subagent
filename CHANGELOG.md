@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased - 0.4.0
+## 0.4.0 - 2026-09-04
 
 - Add persistent `stream-json` managed workers that reuse one warm AGY process across successful follow-up turns when the installed CLI supports stream input/output.
 - Add a persistent per-worker ledger outside the plugin installation directory, storing bounded worker metadata without prompts, responses, source code, or tool output.
