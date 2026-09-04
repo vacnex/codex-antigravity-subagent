@@ -11,9 +11,9 @@ Treat Antigravity as an external delegated worker. It is not a native Codex coll
 
 Prefer managed workers for implementation or any task likely to need review corrections:
 
-1. Establish availability with `agy_check`.
+1. Establish availability with `agy_check` and require a compatible Antigravity CLI capability report before managed work.
 2. Start a new bounded task with `agy_start`.
-3. Unless both values were supplied explicitly, let the MCP client ask the user to choose the Antigravity model and reasoning effort. Do not silently invent either choice.
+3. Unless both values were supplied explicitly, let the MCP client ask the user to choose the Antigravity base model and reasoning effort. Do not silently invent either choice.
 4. Keep the returned `workerId` and `conversationId`. The conversation ID is an Antigravity conversation that remains available for manual inspection and resume.
 5. Inspect the workspace diff and run relevant tests independently.
 6. If review fails, call `agy_followup` with the same `workerId` and concrete correction instructions. Repeat review and follow-up until the work passes.
@@ -28,15 +28,23 @@ Use `agy_delegate` for bounded research, second opinions, or work that does not 
 
 ## Model and effort selection
 
-For a new delegation or managed worker, `model` and `effort` are optional MCP arguments. When either is omitted, the MCP server requests the missing values from the user through MCP elicitation. Available models are discovered from the authenticated Antigravity installation with `agy models --output-format json`.
+For a new delegation or managed worker, `model` and `effort` are optional MCP arguments. When either is omitted, the MCP server requests the missing values from the user through MCP elicitation.
+
+Available models are discovered from the authenticated Antigravity installation. The MCP server tolerates current and older model-catalog command layouts, groups effort-suffixed CLI variants into base-model choices where possible, and resolves the selected effort back to the exact CLI slug. If a model family does not expose the selected effort, return a clear error instead of silently substituting another model or effort.
 
 If the MCP client cannot display elicitation, pass both values explicitly. Valid effort values are `low`, `medium`, and `high`.
 
 Do not ask for model or effort again on `agy_followup`; the existing worker keeps its original selection.
 
+## Managed result handling
+
+Managed workers request Antigravity JSON output and return a compact response plus structured metadata. Preserve useful metadata such as status, duration, number of turns, and token usage, but do not dump Antigravity progress diagnostics into Codex context on successful runs.
+
+The MCP server caps the returned model response and diagnostics. Codex can inspect the shared workspace and diff directly, so the Antigravity handoff should stay concise rather than reproducing large file contents or full diffs.
+
 ## Auditing Antigravity sessions
 
-Managed workers run Antigravity with structured JSON output and retain the returned conversation ID. After delegation, the user can inspect the same Antigravity conversation manually from the workspace with interactive `agy` and `/resume`, or resume a known conversation directly with `agy --conversation <conversation-id>`.
+Managed workers retain the returned Antigravity conversation ID. After delegation, the user can inspect the same Antigravity conversation manually from the workspace with interactive `agy` and `/resume`, or resume a known conversation directly with `agy --conversation <conversation-id>`.
 
 Treat this as an audit trail of the conversation and visible agent/tool activity that Antigravity stores. Do not describe it as access to hidden model chain-of-thought.
 
@@ -52,7 +60,9 @@ node <skill-dir>/scripts/agy-delegate.mjs --cwd <absolute-workspace> --mode plan
 
 To resume a known Antigravity conversation through the fallback runner, add `--conversation <conversation-id>`.
 
-Delete the temporary prompt file after the runner finishes. The runner accepts `--output-format text|json`, `--timeout-seconds 1..1800`, `--agent`, `--model`, `--effort`, and `--conversation`. The runner cannot provide the MCP picker, so select model and effort explicitly when they matter. Do not add or emulate dangerous permission-bypass flags.
+The runner accepts `--output-format text|json`, `--timeout-seconds 1..1800`, `--agent`, `--model`, `--effort`, and `--conversation`. It avoids passing a duplicate `--effort` flag when the chosen model slug already pins the effort. The runner cannot provide the MCP picker, so select model and effort explicitly when they matter.
+
+Delete the temporary prompt file after the runner finishes. Do not add or emulate dangerous permission-bypass flags.
 
 If neither the MCP tools nor local process execution is available, explain that this plugin requires a local Codex environment with Node.js and an authenticated `agy` installation.
 
