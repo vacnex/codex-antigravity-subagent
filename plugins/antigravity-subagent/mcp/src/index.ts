@@ -9,7 +9,9 @@ import { serveStdio } from '@modelcontextprotocol/server/stdio';
 import * as z from 'zod/v4';
 
 const VERSION = '0.2.0';
-const MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
+const MAX_STDOUT_BYTES = 2 * 1024 * 1024;
+const MAX_STDERR_BYTES = 8 * 1024;
+const MAX_RESPONSE_BYTES = 64 * 1024;
 const MODEL_LIST_TIMEOUT_MS = 15_000;
 
 type Effort = 'low' | 'medium' | 'high';
@@ -83,6 +85,26 @@ type RunResult = {
   truncated: boolean;
 };
 
+function appendBounded(
+  current: Buffer<ArrayBufferLike>,
+  chunk: Buffer<ArrayBufferLike>,
+  maxBytes: number,
+): { buffer: Buffer<ArrayBufferLike>; truncated: boolean } {
+  if (current.length >= maxBytes) return { buffer: current, truncated: true };
+  const remaining = maxBytes - current.length;
+  return {
+    buffer: Buffer.concat([current, chunk.subarray(0, remaining)]),
+    truncated: chunk.length > remaining,
+  };
+}
+
+function clipResponse(text: string): { text: string; truncated: boolean } {
+  const encoded = Buffer.from(text, 'utf8');
+  if (encoded.length <= MAX_RESPONSE_BYTES) return { text, truncated: false };
+  const clipped = encoded.subarray(0, MAX_RESPONSE_BYTES).toString('utf8');
+  return { text: `${clipped}\n\n[Response truncated at 64 KiB]`, truncated: true };
+}
+
 function runAgy(executable: string, args: string[], cwd: string, timeoutMs: number): Promise<RunResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(executable, args, {
@@ -96,18 +118,16 @@ function runAgy(executable: string, args: string[], cwd: string, timeoutMs: numb
     let truncated = false;
     let timedOut = false;
 
-    const append = (current: Buffer<ArrayBufferLike>, chunk: Buffer<ArrayBufferLike>): Buffer<ArrayBufferLike> => {
-      if (current.length >= MAX_OUTPUT_BYTES) {
-        truncated = true;
-        return current;
-      }
-      const remaining = MAX_OUTPUT_BYTES - current.length;
-      if (chunk.length > remaining) truncated = true;
-      return Buffer.concat([current, chunk.subarray(0, remaining)]);
-    };
-
-    child.stdout.on('data', (chunk: Buffer<ArrayBufferLike>) => { stdout = append(stdout, chunk); });
-    child.stderr.on('data', (chunk: Buffer<ArrayBufferLike>) => { stderr = append(stderr, chunk); });
+    child.stdout.on('data', (chunk: Buffer<ArrayBufferLike>) => {
+      const appended = appendBounded(stdout, chunk, MAX_STDOUT_BYTES);
+      stdout = appended.buffer;
+      truncated ||= appended.truncated;
+    });
+    child.stderr.on('data', (chunk: Buffer<ArrayBufferLike>) => {
+      const appended = appendBounded(stderr, chunk, MAX_STDERR_BYTES);
+      stderr = appended.buffer;
+      truncated ||= appended.truncated;
+    });
     child.on('error', reject);
 
     const timer = setTimeout(() => {
@@ -283,14 +303,15 @@ function managedResult(
   const response = envelope?.response?.trim() || '';
   const error = envelope?.error?.trim() || '';
   const fallbackError = result.stderr.trim() || result.stdout.trim();
-  const text = result.timedOut
+  const rawText = result.timedOut
     ? `Antigravity timed out after ${timeoutSeconds} seconds.`
     : response || error || fallbackError || '(Antigravity returned no output)';
+  const clipped = clipResponse(rawText);
   const isError = result.timedOut || result.exitCode !== 0 || (envelope !== undefined && envelope.status !== 'SUCCESS');
   const conversationId = worker?.conversationId ?? envelope?.conversation_id ?? undefined;
 
   return {
-    content: [{ type: 'text' as const, text }],
+    content: [{ type: 'text' as const, text: clipped.text }],
     structuredContent: {
       workerId: worker?.workerId,
       conversationId,
@@ -304,7 +325,7 @@ function managedResult(
       usage: envelope?.usage,
       exitCode: result.exitCode,
       timedOut: result.timedOut,
-      truncated: result.truncated,
+      truncated: result.truncated || clipped.truncated,
     },
     isError,
   };
@@ -402,17 +423,21 @@ function createServer(): McpServer {
 
       try {
         const result = await runAgy(executable, args, resolvedCwd, timeoutSeconds * 1000);
-        const summary = [result.stdout.trim()];
-        if (result.stderr.trim()) summary.push(`stderr:\n${result.stderr.trim()}`);
-        if (result.truncated) summary.push('[Output truncated at 2 MiB]');
-        if (result.timedOut) summary.push(`[Timed out after ${timeoutSeconds} seconds]`);
         const isError = result.timedOut || result.exitCode !== 0;
+        const clippedStdout = clipResponse(result.stdout.trim());
+        const summary = [clippedStdout.text];
+        if (isError && result.stderr.trim()) {
+          const clippedStderr = clipResponse(result.stderr.trim());
+          summary.push(`stderr:\n${clippedStderr.text}`);
+        }
+        if (result.timedOut) summary.push(`[Timed out after ${timeoutSeconds} seconds]`);
+        const responseTruncated = result.truncated || clippedStdout.truncated;
         return {
           content: [{ type: 'text', text: summary.filter(Boolean).join('\n\n') || '(Antigravity returned no output)' }],
           structuredContent: {
             exitCode: result.exitCode,
             timedOut: result.timedOut,
-            truncated: result.truncated,
+            truncated: responseTruncated,
             mode,
             cwd: resolvedCwd,
             model: selection.model,
