@@ -125,8 +125,6 @@ export class WorkerStore {
     const json = `${JSON.stringify(record, null, 2)}\n`;
     await writeFile(temporary, json, { encoding: 'utf8', flag: 'wx' });
     try {
-      // Node/libuv uses replace-existing semantics for rename on supported platforms,
-      // so readers observe either the old complete record or the new complete record.
       await rename(temporary, target);
     } catch (error) {
       await rm(temporary, { force: true }).catch(() => undefined);
