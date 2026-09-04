@@ -17,7 +17,7 @@ import {
 } from './cli.js';
 import { WorkerRuntime } from './runtime.js';
 
-const VERSION = '0.4.0';
+const VERSION = '0.4.1';
 
 async function createServer(): Promise<McpServer> {
   const runtime = new WorkerRuntime();
@@ -155,8 +155,6 @@ async function createServer(): Promise<McpServer> {
         return { content: [{ type: 'text', text: `Workspace is not accessible: ${resolvedCwd}` }], isError: true };
       }
 
-      // Retry dedupe happens before CLI discovery/model elicitation so a lost agy_start response
-      // can be retried without prompting again or creating a second Antigravity conversation.
       const reused = await runtime.reuseExistingStart({ name, cwd: resolvedCwd, idempotencyKey });
       if (reused) return reused;
 
