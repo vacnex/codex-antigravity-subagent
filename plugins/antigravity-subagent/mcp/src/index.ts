@@ -15,9 +15,67 @@ import {
   type Effort,
   type RunMode,
 } from './cli.js';
-import { WorkerRuntime } from './runtime.js';
+import { WorkerRuntime, type RuntimeToolResult } from './runtime.js';
 
 const VERSION = '0.4.1';
+const WAIT_POLL_MS = 1_000;
+
+function isRunningResult(result: RuntimeToolResult): boolean {
+  return result.structuredContent.done === false || result.structuredContent.state === 'running';
+}
+
+function describeRunningResult(result: RuntimeToolResult, workerId: string): RuntimeToolResult {
+  if (!isRunningResult(result)) return result;
+  const name = typeof result.structuredContent.name === 'string' ? result.structuredContent.name : workerId;
+  const progress = result.structuredContent.progress;
+  let progressText = '';
+  if (progress && typeof progress === 'object') {
+    const summary = progress as Record<string, unknown>;
+    const steps = typeof summary.stepUpdates === 'number' ? summary.stepUpdates : undefined;
+    const tools = typeof summary.toolEvents === 'number' ? summary.toolEvents : undefined;
+    if (steps !== undefined || tools !== undefined) {
+      progressText = ` Progress: ${steps ?? 0} step updates, ${tools ?? 0} tool events.`;
+    }
+  }
+  if (result.content[0]) {
+    result.content[0].text = `${name} (${workerId}) is still running in the background.${progressText} Use agy_wait to wait passively for completion, or agy_status for a lifecycle snapshot.`;
+  }
+  return result;
+}
+
+function annotateWaitExit(
+  result: RuntimeToolResult,
+  workerId: string,
+  reason: 'timeout' | 'canceled',
+): RuntimeToolResult {
+  describeRunningResult(result, workerId);
+  result.structuredContent.waitTimedOut = reason === 'timeout';
+  result.structuredContent.waitCanceled = reason === 'canceled';
+  result.structuredContent.workerContinues = isRunningResult(result);
+  if (result.content[0] && isRunningResult(result)) {
+    const prefix = reason === 'timeout'
+      ? 'The passive wait interval ended before the worker finished.'
+      : 'The passive wait was canceled by the MCP client.';
+    result.content[0].text = `${prefix} The Antigravity worker was not canceled and continues in the background. ${result.content[0].text}`;
+  }
+  return result;
+}
+
+async function waitDelay(ms: number, signal: AbortSignal): Promise<boolean> {
+  if (signal.aborted) return false;
+  return await new Promise<boolean>((resolve) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', onAbort);
+      resolve(false);
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve(true);
+    }, ms);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+}
 
 async function createServer(): Promise<McpServer> {
   const runtime = new WorkerRuntime();
@@ -27,7 +85,7 @@ async function createServer(): Promise<McpServer> {
     { name: 'agy-mcp-server', version: VERSION },
     {
       instructions:
-        'Use agy_check before first delegation. Managed agy_start/agy_followup launches return quickly while AGY continues in the background; use agy_result for the final turn response and agy_status for lifecycle/progress metadata. Pass a stable idempotencyKey for every plan-step start and correction retry so a lost/retried MCP call cannot create duplicate AGY work. Review delegated changes independently, use agy_cancel to interrupt an active turn, and agy_close only after the worker passes review.',
+        'Use agy_check before first delegation. Managed agy_start/agy_followup launches return quickly while AGY continues in the background; use agy_wait as the normal completion barrier, agy_result only for an immediate non-blocking snapshot, and agy_status for lifecycle/progress metadata. A RUNNING worker or a passive wait timeout is not a reason to end a requested multi-step plan: wait again until the turn reaches a terminal result, then review/fix/close before proceeding. Pass a stable idempotencyKey for every plan-step start and correction retry so a lost/retried MCP call cannot create duplicate AGY work. Review delegated changes independently, use agy_cancel to interrupt an active turn, and agy_close only after the worker passes review.',
     },
   );
 
@@ -179,7 +237,7 @@ async function createServer(): Promise<McpServer> {
     'agy_followup',
     {
       title: 'Follow Up Antigravity Worker',
-      description: 'Launch review feedback on an existing managed worker. The turn runs in the background; use agy_result to retrieve its final response.',
+      description: 'Launch review feedback on an existing managed worker. The turn runs in the background; use agy_wait to wait for completion or agy_result for an immediate snapshot.',
       inputSchema: z.object({
         workerId: z.string().min(1),
         prompt: z.string().min(1).max(100_000),
@@ -201,11 +259,41 @@ async function createServer(): Promise<McpServer> {
     'agy_result',
     {
       title: 'Antigravity Worker Result',
-      description: 'Read the current/final result state of the latest managed worker turn without sending a new prompt. Final response text is kept only in MCP memory, never persisted to the ledger.',
+      description: 'Read the current/final result state of the latest managed worker turn without sending a new prompt. This is a non-blocking snapshot; use agy_wait when orchestration must not continue before completion. Final response text is kept only in MCP memory, never persisted to the ledger.',
       inputSchema: z.object({ workerId: z.string().min(1) }),
       annotations: { readOnlyHint: true, openWorldHint: false, destructiveHint: false, idempotentHint: true },
     },
-    async ({ workerId }) => runtime.result(workerId),
+    async ({ workerId }) => describeRunningResult(await runtime.result(workerId), workerId),
+  );
+
+  server.registerTool(
+    'agy_wait',
+    {
+      title: 'Wait for Antigravity Worker',
+      description: 'Passively wait for the latest managed worker turn to finish without sending a prompt or owning/canceling the worker. If this wait times out or the MCP client cancels only the wait, the Antigravity worker continues in the background.',
+      inputSchema: z.object({
+        workerId: z.string().min(1),
+        timeoutSeconds: z.number().int().min(1).max(1100).default(900).describe('Maximum passive wait interval; kept below the bundled 1200-second MCP tool timeout'),
+      }),
+      annotations: { readOnlyHint: true, openWorldHint: false, destructiveHint: false, idempotentHint: true },
+    },
+    async ({ workerId, timeoutSeconds }, ctx) => {
+      const deadline = Date.now() + timeoutSeconds * 1000;
+      while (true) {
+        const result = await runtime.result(workerId);
+        if (!isRunningResult(result)) {
+          result.structuredContent.waitTimedOut = false;
+          result.structuredContent.waitCanceled = false;
+          result.structuredContent.workerContinues = false;
+          return result;
+        }
+        if (ctx.mcpReq.signal.aborted) return annotateWaitExit(result, workerId, 'canceled');
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) return annotateWaitExit(result, workerId, 'timeout');
+        const waited = await waitDelay(Math.min(WAIT_POLL_MS, remaining), ctx.mcpReq.signal);
+        if (!waited) return annotateWaitExit(result, workerId, 'canceled');
+      }
+    },
   );
 
   server.registerTool(

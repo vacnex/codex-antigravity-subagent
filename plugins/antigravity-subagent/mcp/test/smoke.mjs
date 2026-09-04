@@ -55,36 +55,35 @@ async function assertProtocolSurface(client) {
   const tools = await client.listTools();
   assert.deepEqual(
     tools.tools.map((tool) => tool.name).sort(),
-    ['agy_cancel', 'agy_check', 'agy_close', 'agy_delegate', 'agy_followup', 'agy_result', 'agy_start', 'agy_status'],
+    ['agy_cancel', 'agy_check', 'agy_close', 'agy_delegate', 'agy_followup', 'agy_result', 'agy_start', 'agy_status', 'agy_wait'],
   );
   const startTool = tools.tools.find((tool) => tool.name === 'agy_start');
   const followupTool = tools.tools.find((tool) => tool.name === 'agy_followup');
   const resultTool = tools.tools.find((tool) => tool.name === 'agy_result');
+  const waitTool = tools.tools.find((tool) => tool.name === 'agy_wait');
   const delegateTool = tools.tools.find((tool) => tool.name === 'agy_delegate');
   const statusTool = tools.tools.find((tool) => tool.name === 'agy_status');
-  assert.ok(startTool && followupTool && resultTool && delegateTool && statusTool);
+  assert.ok(startTool && followupTool && resultTool && waitTool && delegateTool && statusTool);
   assert.deepEqual(startTool.inputSchema.properties?.effort?.enum, ['low', 'medium', 'high']);
   assert.equal(startTool.inputSchema.properties?.name?.maxLength, 120);
   assert.equal(startTool.inputSchema.properties?.idempotencyKey?.maxLength, 200);
   assert.equal(followupTool.inputSchema.properties?.idempotencyKey?.maxLength, 200);
   assert.ok(resultTool.inputSchema.properties?.workerId);
+  assert.ok(waitTool.inputSchema.properties?.workerId);
+  assert.equal(waitTool.inputSchema.properties?.timeoutSeconds?.maximum, 1100);
   assert.deepEqual(delegateTool.inputSchema.properties?.effort?.enum, ['low', 'medium', 'high']);
 }
 
 async function waitForResult(client, workerId, expectedText, timeoutMs = 180_000) {
-  const deadline = Date.now() + timeoutMs;
-  let last;
-  while (Date.now() < deadline) {
-    last = await client.callTool({ name: 'agy_result', arguments: { workerId } });
-    if (last.structuredContent?.done === true) {
-      assertToolSucceeded(`agy_result ${workerId}`, last);
-      if (expectedText) assert.match(last.content[0].text, expectedText);
-      return last;
-    }
-    assert.equal(last.structuredContent?.state, 'running');
-    await sleep(500);
-  }
-  assert.fail(`Timed out waiting for ${workerId}: ${JSON.stringify(last, null, 2)}`);
+  const timeoutSeconds = Math.max(1, Math.ceil(timeoutMs / 1000));
+  const result = await client.callTool({ name: 'agy_wait', arguments: { workerId, timeoutSeconds } });
+  assertToolSucceeded(`agy_wait ${workerId}`, result);
+  assert.equal(result.structuredContent?.done, true);
+  assert.equal(result.structuredContent?.waitTimedOut, false);
+  assert.equal(result.structuredContent?.waitCanceled, false);
+  assert.equal(result.structuredContent?.workerContinues, false);
+  if (expectedText) assert.match(result.content[0].text, expectedText);
+  return result;
 }
 
 let first;
