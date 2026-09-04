@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased - v0.4.x hotfix
+## 0.4.1 - 2026-09-04
 
 - Change persistent managed `agy_start` to return after the AGY stream init/conversation handshake and durable `state=running` registration, while the long first turn continues in the background.
 - Change managed `agy_followup` to launch correction turns in the background as well, avoiding another long blocking MCP call.
