@@ -8,6 +8,7 @@ import { McpServer, type ServerContext } from '@modelcontextprotocol/server';
 import { serveStdio } from '@modelcontextprotocol/server/stdio';
 import * as z from 'zod/v4';
 
+import { AgyPersistentDriver, type AgyDriverTurnResult } from './driver.js';
 import {
   detectAgyStreamingCapabilities,
   type AgyStreamingCapabilities,
@@ -65,6 +66,8 @@ type WorkerState = {
   effort: Effort;
   createdAt: string;
 };
+
+type WorkerBase = Omit<WorkerState, 'workerId' | 'conversationId' | 'createdAt'>;
 
 async function isExecutable(candidate: string): Promise<boolean> {
   try {
@@ -358,6 +361,14 @@ async function probeAgyCapabilities(executable: string): Promise<{
   };
 }
 
+async function probeStreamingCapabilities(executable: string, cwd: string): Promise<AgyStreamingCapabilities> {
+  const helpResult = await runAgy(executable, ['--help'], cwd, CAPABILITY_TIMEOUT_MS);
+  if (helpResult.timedOut || helpResult.exitCode !== 0) {
+    return { streamOutput: false, streamInput: false, persistentDriver: false };
+  }
+  return detectAgyStreamingCapabilities(`${helpResult.stdout}\n${helpResult.stderr}`);
+}
+
 function resolveModelFamilySelection(
   families: ModelFamilyOption[],
   selectedModel: string,
@@ -477,10 +488,22 @@ function parseAgyEnvelope(result: RunResult): AgyEnvelope | undefined {
   }
 }
 
-function buildManagedArgs(prompt: string, worker: Omit<WorkerState, 'workerId' | 'conversationId' | 'createdAt'>, conversationId?: string): string[] {
+function buildManagedArgs(prompt: string, worker: WorkerBase, conversationId?: string): string[] {
   const args = [
     '--print', prompt,
     '--output-format', 'json',
+    '--mode', worker.mode,
+  ];
+  appendModelAndEffortArgs(args, worker.model, worker.effort);
+  if (worker.agent) args.push('--agent', worker.agent);
+  if (conversationId) args.push('--conversation', conversationId);
+  return args;
+}
+
+function buildPersistentArgs(worker: WorkerBase, conversationId?: string): string[] {
+  const args = [
+    '--input-format', 'stream-json',
+    '--output-format', 'stream-json',
     '--mode', worker.mode,
   ];
   appendModelAndEffortArgs(args, worker.model, worker.effort);
@@ -521,6 +544,44 @@ function managedResult(
       exitCode: result.exitCode,
       timedOut: result.timedOut,
       truncated: result.truncated || clipped.truncated,
+      transport: 'oneshot',
+    },
+    isError,
+  };
+}
+
+function managedStreamResult(
+  turn: AgyDriverTurnResult,
+  worker: WorkerState,
+  timeoutSeconds: number,
+  driverPid?: number,
+) {
+  const result = turn.result;
+  const response = result?.response?.trim() || '';
+  const error = result?.error?.trim() || '';
+  const rawText = turn.timedOut
+    ? `Antigravity timed out after ${timeoutSeconds} seconds.`
+    : response || error || turn.stderr || '(Antigravity returned no output)';
+  const clipped = clipResponse(rawText);
+  const isError = turn.timedOut || !result || result.status !== 'SUCCESS';
+
+  return {
+    content: [{ type: 'text' as const, text: clipped.text }],
+    structuredContent: {
+      workerId: worker.workerId,
+      conversationId: result?.conversationId ?? worker.conversationId,
+      status: result?.status ?? (isError ? 'ERROR' : 'SUCCESS'),
+      model: worker.model,
+      effort: worker.effort,
+      mode: worker.mode,
+      cwd: worker.cwd,
+      durationSeconds: result?.durationSeconds,
+      numTurns: result?.numTurns,
+      usage: result?.usage,
+      timedOut: turn.timedOut,
+      truncated: turn.diagnosticsTruncated || clipped.truncated,
+      transport: 'stream',
+      driverPid,
     },
     isError,
   };
@@ -528,6 +589,7 @@ function managedResult(
 
 function createServer(): McpServer {
   const workers = new Map<string, WorkerState>();
+  const drivers = new Map<string, AgyPersistentDriver>();
   const server = new McpServer(
     { name: 'agy-mcp-server', version: VERSION },
     {
@@ -713,8 +775,54 @@ function createServer(): McpServer {
       const selection = await chooseModelAndEffort(ctx, executable, resolvedCwd, model, effort);
       if ('error' in selection) return { content: [{ type: 'text', text: selection.error }], isError: true };
 
-      const baseWorker = { cwd: resolvedCwd, mode, agent, model: selection.model, effort: selection.effort };
+      const baseWorker: WorkerBase = { cwd: resolvedCwd, mode, agent, model: selection.model, effort: selection.effort };
       try {
+        const streaming = await probeStreamingCapabilities(executable, resolvedCwd);
+        if (streaming.persistentDriver) {
+          const driver = new AgyPersistentDriver({
+            command: executable,
+            args: buildPersistentArgs(baseWorker),
+            cwd: resolvedCwd,
+          });
+          try {
+            const turn = await driver.send(prompt, timeoutSeconds * 1000);
+            const conversationId = turn.result?.conversationId ?? driver.currentConversationId;
+            if (turn.timedOut || !turn.result || !conversationId) {
+              if (driver.isAlive) await driver.close();
+              const message = turn.timedOut
+                ? `Antigravity timed out after ${timeoutSeconds} seconds.`
+                : turn.result?.error || turn.stderr || 'Antigravity stream did not return a conversation ID.';
+              return {
+                content: [{ type: 'text', text: message }],
+                structuredContent: {
+                  status: turn.result?.status ?? 'ERROR',
+                  model: baseWorker.model,
+                  effort: baseWorker.effort,
+                  mode: baseWorker.mode,
+                  cwd: baseWorker.cwd,
+                  timedOut: turn.timedOut,
+                  transport: 'stream',
+                  driverPid: driver.pid,
+                },
+                isError: true,
+              };
+            }
+
+            const worker: WorkerState = {
+              workerId: `agy_${randomUUID()}`,
+              conversationId,
+              ...baseWorker,
+              createdAt: new Date().toISOString(),
+            };
+            workers.set(worker.workerId, worker);
+            drivers.set(worker.workerId, driver);
+            return managedStreamResult(turn, worker, timeoutSeconds, driver.pid);
+          } catch (error) {
+            if (driver.isAlive) await driver.close().catch(() => undefined);
+            throw error;
+          }
+        }
+
         const result = await runAgy(executable, buildManagedArgs(prompt, baseWorker), resolvedCwd, timeoutSeconds * 1000);
         const envelope = parseAgyEnvelope(result);
         let worker: WorkerState | undefined;
@@ -763,7 +871,18 @@ function createServer(): McpServer {
       if (!executable) return { content: [{ type: 'text', text: 'Antigravity CLI was not found. Run agy_check first.' }], isError: true };
 
       try {
-        const baseWorker = { cwd: worker.cwd, mode: worker.mode, agent: worker.agent, model: worker.model, effort: worker.effort };
+        const driver = drivers.get(workerId);
+        if (driver?.isAlive) {
+          const turn = await driver.send(prompt, timeoutSeconds * 1000);
+          if (!driver.isAlive) drivers.delete(workerId);
+          if (turn.result?.conversationId && turn.result.conversationId !== worker.conversationId) {
+            worker.conversationId = turn.result.conversationId;
+          }
+          return managedStreamResult(turn, worker, timeoutSeconds, driver.pid);
+        }
+        if (driver && !driver.isAlive) drivers.delete(workerId);
+
+        const baseWorker: WorkerBase = { cwd: worker.cwd, mode: worker.mode, agent: worker.agent, model: worker.model, effort: worker.effort };
         const result = await runAgy(
           executable,
           buildManagedArgs(prompt, baseWorker, worker.conversationId),
@@ -802,6 +921,21 @@ function createServer(): McpServer {
           structuredContent: { workerId, closed: false },
         };
       }
+
+      const driver = drivers.get(workerId);
+      if (driver) {
+        try {
+          await driver.close();
+        } catch (error) {
+          return {
+            content: [{ type: 'text', text: `Could not close Antigravity worker ${workerId}: ${error instanceof Error ? error.message : String(error)}` }],
+            structuredContent: { workerId, conversationId: worker.conversationId, closed: false },
+            isError: true,
+          };
+        }
+        drivers.delete(workerId);
+      }
+
       workers.delete(workerId);
       return {
         content: [{ type: 'text', text: `Closed ${workerId}. Antigravity conversation ${worker.conversationId} remains resumable.` }],
