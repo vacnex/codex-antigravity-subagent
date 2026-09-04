@@ -55,6 +55,7 @@ export class AgyPersistentDriver {
   private readonly maxDiagnosticBytes: number;
   private readonly onEvent?: (event: AgyStreamEvent) => void;
   private readonly onExit?: (exitCode: number | null) => void;
+  private readonly parentExitHandler: () => void;
   private stderrTail: Buffer<ArrayBufferLike> = Buffer.alloc(0);
   private diagnosticsTruncated = false;
   private pending?: PendingTurn;
@@ -75,6 +76,17 @@ export class AgyPersistentDriver {
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 
+    // A warm worker must not keep an MCP stdio server alive after its parent connection closes.
+    // The parent exit hook still terminates the child so it does not become an orphan process.
+    this.child.unref();
+    (this.child.stdin as unknown as { unref?: () => void }).unref?.();
+    (this.child.stdout as unknown as { unref?: () => void }).unref?.();
+    (this.child.stderr as unknown as { unref?: () => void }).unref?.();
+    this.parentExitHandler = () => {
+      try { this.child.kill(); } catch { /* parent is already exiting */ }
+    };
+    process.once('exit', this.parentExitHandler);
+
     const lines = createInterface({ input: this.child.stdout, crlfDelay: Infinity });
     lines.on('line', (line) => this.handleLine(line));
     this.child.stderr.on('data', (chunk: Buffer<ArrayBufferLike>) => {
@@ -88,6 +100,7 @@ export class AgyPersistentDriver {
       this.failPending(new Error(`Antigravity stream process error: ${error.message}`));
     });
     this.child.on('close', (exitCode) => {
+      process.removeListener('exit', this.parentExitHandler);
       this.closed = true;
       this.exitCode = exitCode;
       if (this.pending) {
