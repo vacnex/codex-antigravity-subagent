@@ -82,6 +82,8 @@ export class AgyPersistentDriver {
     });
 
     this.child.on('error', (error) => {
+      this.closed = true;
+      this.exitCode = null;
       this.failPending(new Error(`Antigravity stream process error: ${error.message}`));
     });
 
@@ -131,7 +133,10 @@ export class AgyPersistentDriver {
       this.pending = { resolve, reject, timer };
       const line = `${buildAgyStreamUserMessage(prompt)}\n`;
       this.child.stdin.write(line, 'utf8', (error) => {
-        if (error) this.failPending(new Error(`Failed to write Antigravity stream input: ${error.message}`));
+        if (error) {
+          this.failPending(new Error(`Failed to write Antigravity stream input: ${error.message}`));
+          this.child.kill();
+        }
       });
     });
   }
@@ -146,7 +151,13 @@ export class AgyPersistentDriver {
       closePromise.then(() => true),
       new Promise<boolean>((resolve) => setTimeout(() => resolve(false), graceMs)),
     ]);
-    if (!graceful && !this.closed) this.child.kill();
+    if (graceful || this.closed) return;
+
+    this.child.kill();
+    await Promise.race([
+      closePromise,
+      new Promise<void>((resolve) => setTimeout(resolve, 1_000)),
+    ]);
   }
 
   private handleLine(line: string): void {
