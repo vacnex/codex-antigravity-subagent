@@ -1,6 +1,6 @@
 {
   "name": "antigravity-subagent",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Delegate bounded tasks from Codex to persistent, recoverable Google Antigravity CLI workers through a skill or MCP tools.",
   "author": {
     "name": "IlleJiViN"
