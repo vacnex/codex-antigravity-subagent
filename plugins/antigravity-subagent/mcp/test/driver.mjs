@@ -110,6 +110,7 @@ lines.on('line', async (line) => {
   assert.equal(second.result?.numTurns, 2);
   assert.equal(second.result?.usage?.total_tokens, 24);
   assert.equal(driver.pid, pid);
+  assert.equal(driver.isAlive, true);
   assert.equal(events.filter((event) => event.event === 'init').length, 1);
   assert.equal(events.filter((event) => event.event === 'result').length, 2);
 
@@ -119,6 +120,8 @@ lines.on('line', async (line) => {
     /already has a turn in progress/,
   );
   await slow;
+  assert.equal(driver.pid, pid);
+  assert.equal(driver.isAlive, true);
 
   await driver.close();
   assert.equal(driver.isAlive, false);
