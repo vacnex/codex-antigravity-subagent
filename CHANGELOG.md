@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased - v0.4.x hotfix
+
+- Change persistent managed `agy_start` to return after the AGY stream init/conversation handshake and durable `state=running` registration, while the long first turn continues in the background.
+- Change managed `agy_followup` to launch correction turns in the background as well, avoiding another long blocking MCP call.
+- Add read-only `agy_result` for current/final managed-turn state without submitting a new prompt. Final response text stays in MCP memory only; the durable ledger still stores no prompt/response content.
+- Add stable `idempotencyKey` support for starts and follow-ups so retrying a lost/uncertain tool response reuses the same logical work instead of spawning duplicate Antigravity conversations.
+- Persist the worker/conversation and active-turn metadata before sending a persistent-stream prompt, eliminating the late-registration race that could make `agy_status` temporarily report no worker after a client timeout.
+- Recover stale persisted running turns as `INTERRUPTED`/`recoverable` after an MCP restart instead of reporting a ghost running process.
+- Extend `agy_status` with active/last turn keys, timeout/cancel/error metadata, compact progress, result availability, and duplicate-worker detection.
+- Raise the bundled Codex MCP `tool_timeout_sec` to 1200 seconds as a compatibility hotfix for legacy blocking AGY paths and explicit one-shot delegation.
+- Update the delegation skill to use background result/status flow, stable retry keys, explicit cancellation after launch, and to avoid wait loops whose only purpose is keeping a long MCP call alive.
+- Expand driver/store/real-MCP smoke coverage for the init handshake, pre-launch running ledger state, start/follow-up deduplication, `agy_result`, restart recovery, and response-not-persisted behavior.
+
 ## 0.4.0 - 2026-09-04
 
 - Add persistent `stream-json` managed workers that reuse one warm AGY process across successful follow-up turns when the installed CLI supports stream input/output.
