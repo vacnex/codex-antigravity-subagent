@@ -1,5 +1,4 @@
 import { randomUUID } from 'node:crypto';
-import type { ChildProcess } from 'node:child_process';
 
 import {
   buildOneShotArgs,
@@ -8,7 +7,6 @@ import {
   parseAgyEnvelope,
   probeAgyCapabilities,
   runAgy,
-  terminateChildProcess,
   type Effort,
   type RunMode,
   type WorkerExecutionOptions,
@@ -17,7 +15,6 @@ import { AgyPersistentDriver, type AgyDriverTurnResult } from './driver.js';
 import {
   WorkerStore,
   type WorkerLedgerRecord,
-  type WorkerLedgerTransport,
   type WorkerLifecycleState,
 } from './store.js';
 import type { AgyStreamEvent, AgyUsage } from './streaming.js';
@@ -64,10 +61,7 @@ type ProgressSummary = {
   subagentEvents: number;
 };
 
-type ActiveOneShot = {
-  controller: AbortController;
-  child?: ChildProcess;
-};
+type ActiveOneShot = { controller: AbortController };
 
 const MAX_RESPONSE_BYTES = 64 * 1024;
 const LEASE_TTL_MS = 120_000;
@@ -107,7 +101,7 @@ function usageDelta(current: AgyUsage | undefined, previous: AgyUsage | undefine
     const now = current[key];
     if (typeof now !== 'number') continue;
     const before = previous?.[key];
-    delta[key] = typeof before === 'number' ? Math.max(0, now - before) : now;
+    delta[key] = typeof before === 'number' && now >= before ? now - before : now;
   }
   return delta;
 }
@@ -134,13 +128,12 @@ function workerFromRecord(record: WorkerLedgerRecord): WorkerState | undefined {
 }
 
 function executionOptions(worker: WorkerState): WorkerExecutionOptions {
-  return {
-    cwd: worker.cwd,
-    mode: worker.mode,
-    agent: worker.agent,
-    model: worker.model,
-    effort: worker.effort,
-  };
+  return { cwd: worker.cwd, mode: worker.mode, agent: worker.agent, model: worker.model, effort: worker.effort };
+}
+
+function combineWarnings(...values: Array<string | undefined>): string | undefined {
+  const warnings = values.filter((value): value is string => Boolean(value));
+  return warnings.length > 0 ? warnings.join(' | ') : undefined;
 }
 
 export class WorkerRuntime {
@@ -151,7 +144,8 @@ export class WorkerRuntime {
   private readonly activeOneShots = new Map<string, ActiveOneShot>();
   private readonly leaseHeartbeats = new Map<string, NodeJS.Timeout>();
   private readonly closing = new Set<string>();
-  private recovered = false;
+  private readonly progress = new WeakMap<AgyPersistentDriver, ProgressSummary>();
+  private recoveryPromise?: Promise<void>;
   private recoveryWarnings: string[] = [];
   private readonly idleDriverMs: number;
   private readonly sweepTimer: NodeJS.Timeout;
@@ -160,13 +154,19 @@ export class WorkerRuntime {
     this.store = store;
     const configured = Number(process.env.AGY_MCP_IDLE_DRIVER_MS);
     this.idleDriverMs = Number.isFinite(configured) && configured >= 10_000 ? configured : DEFAULT_IDLE_DRIVER_MS;
-    this.sweepTimer = setInterval(() => { void this.sweepIdleDrivers(); }, Math.min(60_000, Math.max(10_000, this.idleDriverMs / 2)));
+    this.sweepTimer = setInterval(
+      () => { void this.sweepIdleDrivers(); },
+      Math.min(60_000, Math.max(10_000, this.idleDriverMs / 2)),
+    );
     this.sweepTimer.unref?.();
   }
 
   async ensureRecovered(): Promise<void> {
-    if (this.recovered) return;
-    this.recovered = true;
+    if (!this.recoveryPromise) this.recoveryPromise = this.loadRecovery();
+    await this.recoveryPromise;
+  }
+
+  private async loadRecovery(): Promise<void> {
     try {
       const { records, warnings } = await this.store.listWithWarnings();
       this.recoveryWarnings = warnings;
@@ -184,25 +184,30 @@ export class WorkerRuntime {
   private async acquireLease(workerId: string, keepAlive: boolean): Promise<string | undefined> {
     const result = await this.store.acquireLease(workerId, this.ownerId, LEASE_TTL_MS);
     if (!result.acquired) return result.reason ?? 'worker lease is held by another MCP process';
-    if (keepAlive && !this.leaseHeartbeats.has(workerId)) {
-      const timer = setInterval(() => {
-        void this.store.refreshLease(workerId, this.ownerId, LEASE_TTL_MS).then(async (refreshed) => {
-          if (refreshed) return;
-          const driver = this.drivers.get(workerId);
-          if (driver && !driver.isBusy) await driver.close().catch(() => undefined);
-          this.drivers.delete(workerId);
-          const worker = this.workers.get(workerId);
-          if (worker) {
-            worker.state = 'recoverable';
-            await this.persist(worker, { state: 'recoverable' });
-          }
-          this.stopLeaseHeartbeat(workerId);
-        });
-      }, LEASE_HEARTBEAT_MS);
-      timer.unref?.();
-      this.leaseHeartbeats.set(workerId, timer);
-    }
+    if (keepAlive) this.startLeaseHeartbeat(workerId);
     return undefined;
+  }
+
+  private startLeaseHeartbeat(workerId: string): void {
+    if (this.leaseHeartbeats.has(workerId)) return;
+    const timer = setInterval(() => {
+      void this.store.refreshLease(workerId, this.ownerId, LEASE_TTL_MS).then(async (refreshed) => {
+        if (refreshed) return;
+        const driver = this.drivers.get(workerId);
+        if (driver && !driver.isBusy) await driver.close().catch(() => undefined);
+        this.drivers.delete(workerId);
+        const worker = this.workers.get(workerId);
+        if (worker) {
+          worker.state = 'recoverable';
+          worker.recovered = true;
+          worker.lastActivityAt = new Date().toISOString();
+          await this.persist(worker, { state: 'recoverable', lastDriverPid: undefined });
+        }
+        this.stopLeaseHeartbeat(workerId);
+      });
+    }, LEASE_HEARTBEAT_MS);
+    timer.unref?.();
+    this.leaseHeartbeats.set(workerId, timer);
   }
 
   private stopLeaseHeartbeat(workerId: string): void {
@@ -216,33 +221,14 @@ export class WorkerRuntime {
     await this.store.releaseLease(workerId, this.ownerId).catch(() => false);
   }
 
-  private async persist(
-    worker: WorkerState,
-    patch: Partial<WorkerLedgerRecord> = {},
-  ): Promise<string | undefined> {
+  private async persist(worker: WorkerState, patch: Partial<WorkerLedgerRecord> = {}): Promise<string | undefined> {
     const updatedAt = new Date().toISOString();
     let existing: WorkerLedgerRecord | undefined;
-    try {
-      existing = await this.store.read(worker.workerId);
-    } catch {
-      // Rebuild from in-memory state below.
-    }
+    try { existing = await this.store.read(worker.workerId); } catch { /* rebuild from memory */ }
     const record: WorkerLedgerRecord = {
-      schemaVersion: 1,
-      workerId: worker.workerId,
-      conversationId: worker.conversationId,
-      name: worker.name,
-      cwd: worker.cwd,
-      mode: worker.mode,
-      agent: worker.agent,
-      model: worker.model,
-      effort: worker.effort,
-      createdAt: worker.createdAt,
-      updatedAt,
-      lastActivityAt: worker.lastActivityAt,
-      state: worker.state,
       ...(existing ?? {}),
       ...patch,
+      schemaVersion: 1,
       workerId: worker.workerId,
       conversationId: worker.conversationId,
       name: worker.name,
@@ -265,17 +251,14 @@ export class WorkerRuntime {
   }
 
   private decoratePersistence(result: RuntimeToolResult, error?: string): RuntimeToolResult {
-    if (!error) {
-      result.structuredContent.ledgerPersisted = true;
-      return result;
-    }
-    result.structuredContent.ledgerPersisted = false;
+    result.structuredContent.ledgerPersisted = !error;
+    if (!error) return result;
     result.structuredContent.persistenceError = error;
     if (result.content[0]) result.content[0].text += `\n\n[Warning: worker ledger update failed: ${error}]`;
     return result;
   }
 
-  private progressCounter(): { summary: ProgressSummary; onEvent: (event: AgyStreamEvent) => void } {
+  private createProgress(): { summary: ProgressSummary; onEvent: (event: AgyStreamEvent) => void } {
     const summary: ProgressSummary = { stepUpdates: 0, toolEvents: 0, subagentEvents: 0 };
     return {
       summary,
@@ -288,24 +271,18 @@ export class WorkerRuntime {
     };
   }
 
-  private async makeDriver(worker: WorkerState, executable: string): Promise<AgyPersistentDriver> {
-    const progress = this.progressCounter();
+  private createDriver(worker: WorkerState, executable: string, resume: boolean): AgyPersistentDriver {
+    const progress = this.createProgress();
     let driver!: AgyPersistentDriver;
     driver = new AgyPersistentDriver({
       command: executable,
-      args: buildPersistentArgs(executionOptions(worker), worker.recovered ? worker.conversationId : undefined),
+      args: buildPersistentArgs(executionOptions(worker), resume ? worker.conversationId : undefined),
       cwd: worker.cwd,
       onEvent: progress.onEvent,
-      onExit: () => {
-        queueMicrotask(() => { void this.handleDriverExit(worker.workerId, driver); });
-      },
+      onExit: () => queueMicrotask(() => { void this.handleDriverExit(worker.workerId, driver); }),
     });
-    Object.defineProperty(driver, '__agyProgress', { value: progress.summary, enumerable: false });
+    this.progress.set(driver, progress.summary);
     return driver;
-  }
-
-  private driverProgress(driver: AgyPersistentDriver | undefined): ProgressSummary | undefined {
-    return driver ? (driver as AgyPersistentDriver & { __agyProgress?: ProgressSummary }).__agyProgress : undefined;
   }
 
   private async handleDriverExit(workerId: string, driver: AgyPersistentDriver): Promise<void> {
@@ -322,7 +299,7 @@ export class WorkerRuntime {
     await this.releaseLease(workerId);
   }
 
-  private resultFromStream(
+  private streamResult(
     worker: WorkerState,
     turn: AgyDriverTurnResult,
     driver: AgyPersistentDriver,
@@ -362,29 +339,27 @@ export class WorkerRuntime {
         transport: 'stream',
         driverPid: driver.pid,
         warm: driver.isAlive,
-        progress: this.driverProgress(driver),
+        progress: this.progress.get(driver),
       },
       isError,
     };
   }
 
-  private resultFromOneShot(
+  private oneShotResult(
     worker: WorkerState,
     result: Awaited<ReturnType<typeof runAgy>>,
     timeoutSeconds: number,
     previousUsage?: AgyUsage,
   ): RuntimeToolResult {
     const envelope = parseAgyEnvelope(result);
-    const response = envelope?.response?.trim() || '';
     const rawText = result.timedOut
       ? `Antigravity timed out after ${timeoutSeconds} seconds.`
       : result.canceled
         ? 'Antigravity turn was canceled.'
-        : response || envelope?.error?.trim() || result.stderr.trim() || result.stdout.trim() || '(Antigravity returned no output)';
+        : envelope?.response?.trim() || envelope?.error?.trim() || result.stderr.trim() || result.stdout.trim() || '(Antigravity returned no output)';
     const clipped = clipResponse(rawText);
     const sessionUsage = envelope?.usage;
-    const turnUsage = usageDelta(sessionUsage, previousUsage);
-    const isError = result.timedOut || result.canceled || result.exitCode !== 0 || (envelope && envelope.status !== 'SUCCESS');
+    const isError = result.timedOut || result.canceled || result.exitCode !== 0 || Boolean(envelope && envelope.status !== 'SUCCESS');
     return {
       content: [{ type: 'text', text: clipped.text }],
       structuredContent: {
@@ -401,7 +376,7 @@ export class WorkerRuntime {
         numTurns: envelope?.num_turns,
         usage: sessionUsage,
         sessionUsage,
-        turnUsage,
+        turnUsage: usageDelta(sessionUsage, previousUsage),
         exitCode: result.exitCode,
         timedOut: result.timedOut,
         canceled: result.canceled,
@@ -409,7 +384,7 @@ export class WorkerRuntime {
         transport: 'oneshot',
         warm: false,
       },
-      isError: Boolean(isError),
+      isError,
     };
   }
 
@@ -417,6 +392,7 @@ export class WorkerRuntime {
     await this.ensureRecovered();
     const executable = await findAgy();
     if (!executable) return textError('Antigravity CLI was not found. Run agy_check first.');
+
     const workerId = `agy_${randomUUID()}`;
     const now = new Date().toISOString();
     const worker: WorkerState = {
@@ -438,47 +414,43 @@ export class WorkerRuntime {
     if (capabilities.streaming.persistentDriver) {
       const leaseError = await this.acquireLease(workerId, true);
       if (leaseError) return textError(`Could not acquire worker lease: ${leaseError}`, { workerId });
-      const progress = this.progressCounter();
-      const driver = new AgyPersistentDriver({
-        command: executable,
-        args: buildPersistentArgs(executionOptions(worker)),
-        cwd: worker.cwd,
-        onEvent: progress.onEvent,
-        onExit: () => queueMicrotask(() => { void this.handleDriverExit(workerId, driver); }),
-      });
-      Object.defineProperty(driver, '__agyProgress', { value: progress.summary, enumerable: false });
+      const driver = this.createDriver(worker, executable, false);
       try {
         const turn = await driver.send(input.prompt, input.timeoutSeconds * 1000, input.signal);
         const conversationId = turn.result?.conversationId ?? driver.currentConversationId;
         if (!conversationId) {
           await driver.close().catch(() => undefined);
           await this.releaseLease(workerId);
-          return textError(turn.canceled ? 'Antigravity start was canceled before a conversation was created.' : 'Antigravity stream did not return a conversation ID.');
+          return textError(turn.canceled
+            ? 'Antigravity start was canceled before a conversation was created.'
+            : 'Antigravity stream did not return a conversation ID.');
         }
         worker.conversationId = conversationId;
+        worker.lastUsage = turn.result?.usage;
+        worker.lastActivityAt = new Date().toISOString();
         worker.state = turn.timedOut || turn.canceled || !driver.isAlive ? 'recoverable' : 'ready';
         worker.recovered = worker.state === 'recoverable';
-        worker.lastActivityAt = new Date().toISOString();
-        worker.lastUsage = turn.result?.usage;
         this.workers.set(workerId, worker);
         if (driver.isAlive) this.drivers.set(workerId, driver);
         else await this.releaseLease(workerId);
-        const turnUsage = usageDelta(turn.result?.usage, undefined);
         const persistenceError = await this.persist(worker, {
           state: worker.state,
           lastTransport: 'stream',
-          lastDriverPid: driver.pid,
+          lastDriverPid: driver.isAlive ? driver.pid : undefined,
           lastResultStatus: turn.result?.status ?? (turn.canceled ? 'CANCELED' : 'ERROR'),
           lastDurationSeconds: turn.result?.durationSeconds,
           lastNumTurns: turn.result?.numTurns,
-          lastUsage: turn.result?.usage,
-          lastTurnUsage: turnUsage,
+          lastUsage: worker.lastUsage,
+          lastTurnUsage: usageDelta(worker.lastUsage, undefined),
           lastTimedOut: turn.timedOut,
           lastCanceled: turn.canceled,
         });
-        return this.decoratePersistence(this.resultFromStream(worker, turn, driver, input.timeoutSeconds), persistenceError);
+        return this.decoratePersistence(this.streamResult(worker, turn, driver, input.timeoutSeconds), persistenceError);
       } catch (error) {
+        this.closing.add(workerId);
         await driver.close().catch(() => undefined);
+        this.closing.delete(workerId);
+        this.drivers.delete(workerId);
         await this.releaseLease(workerId);
         return textError(`Failed to start Antigravity worker: ${error instanceof Error ? error.message : String(error)}`);
       }
@@ -493,27 +465,28 @@ export class WorkerRuntime {
     );
     const envelope = parseAgyEnvelope(result);
     if (!envelope?.conversation_id) {
-      return textError(result.canceled ? 'Antigravity start was canceled before a conversation was created.' : result.stderr || 'Antigravity did not return a conversation ID.');
+      return textError(result.canceled
+        ? 'Antigravity start was canceled before a conversation was created.'
+        : result.stderr || 'Antigravity did not return a conversation ID.');
     }
     worker.conversationId = envelope.conversation_id;
+    worker.lastUsage = envelope.usage;
+    worker.lastActivityAt = new Date().toISOString();
     worker.state = result.timedOut || result.canceled ? 'recoverable' : 'ready';
     worker.recovered = worker.state === 'recoverable';
-    worker.lastActivityAt = new Date().toISOString();
-    worker.lastUsage = envelope.usage;
     this.workers.set(workerId, worker);
-    const turnUsage = usageDelta(envelope.usage, undefined);
     const persistenceError = await this.persist(worker, {
       state: worker.state,
       lastTransport: 'oneshot',
       lastResultStatus: envelope.status,
       lastDurationSeconds: envelope.duration_seconds,
       lastNumTurns: envelope.num_turns,
-      lastUsage: envelope.usage,
-      lastTurnUsage: turnUsage,
+      lastUsage: worker.lastUsage,
+      lastTurnUsage: usageDelta(worker.lastUsage, undefined),
       lastTimedOut: result.timedOut,
       lastCanceled: result.canceled,
     });
-    return this.decoratePersistence(this.resultFromOneShot(worker, result, input.timeoutSeconds), persistenceError);
+    return this.decoratePersistence(this.oneShotResult(worker, result, input.timeoutSeconds), persistenceError);
   }
 
   async followup(input: WorkerFollowupInput): Promise<RuntimeToolResult> {
@@ -521,26 +494,26 @@ export class WorkerRuntime {
     const worker = this.workers.get(input.workerId);
     if (!worker) return textError(`Unknown or closed Antigravity worker: ${input.workerId}.`, { workerId: input.workerId });
     const executable = await findAgy();
-    if (!executable) return textError('Antigravity CLI was not found. Run agy_check first.', { workerId: input.workerId });
+    if (!executable) return textError('Antigravity CLI was not found. Run agy_check first.', { workerId: worker.workerId });
 
-    const existingDriver = this.drivers.get(worker.workerId);
-    let keepLease = Boolean(existingDriver?.isAlive);
-    const leaseError = await this.acquireLease(worker.workerId, keepLease);
+    let driver = this.drivers.get(worker.workerId);
+    if (driver && !driver.isAlive) {
+      this.drivers.delete(worker.workerId);
+      driver = undefined;
+    }
+    const capabilities = driver ? undefined : await probeAgyCapabilities(executable);
+    const useStream = Boolean(driver || capabilities?.streaming.persistentDriver);
+    const leaseError = await this.acquireLease(worker.workerId, useStream);
     if (leaseError) return textError(`Antigravity worker ${worker.workerId} is busy elsewhere: ${leaseError}`, { workerId: worker.workerId });
 
+    const previousUsage = worker.lastUsage;
     worker.state = 'running';
     worker.lastActivityAt = new Date().toISOString();
-    await this.persist(worker, { state: 'running' });
-    const previousUsage = worker.lastUsage;
+    const prePersistError = await this.persist(worker, { state: 'running' });
 
     try {
-      let driver = existingDriver?.isAlive ? existingDriver : undefined;
-      const capabilities = await probeAgyCapabilities(executable);
-      if (!driver && capabilities.streaming.persistentDriver) {
-        keepLease = true;
-        await this.acquireLease(worker.workerId, true);
-        worker.recovered = true;
-        driver = await this.makeDriver(worker, executable);
+      if (!driver && useStream) {
+        driver = this.createDriver(worker, executable, true);
         this.drivers.set(worker.workerId, driver);
       }
 
@@ -555,64 +528,78 @@ export class WorkerRuntime {
           this.drivers.delete(worker.workerId);
           await this.releaseLease(worker.workerId);
         }
-        const turnUsage = usageDelta(turn.result?.usage, previousUsage);
         const persistenceError = await this.persist(worker, {
           state: worker.state,
           lastTransport: 'stream',
-          lastDriverPid: driver.pid,
+          lastDriverPid: driver.isAlive ? driver.pid : undefined,
           lastResultStatus: turn.result?.status ?? (turn.canceled ? 'CANCELED' : 'ERROR'),
           lastDurationSeconds: turn.result?.durationSeconds,
           lastNumTurns: turn.result?.numTurns,
-          lastUsage: turn.result?.usage,
-          lastTurnUsage: turnUsage,
+          lastUsage: worker.lastUsage,
+          lastTurnUsage: usageDelta(worker.lastUsage, previousUsage),
           lastTimedOut: turn.timedOut,
           lastCanceled: turn.canceled,
         });
-        return this.decoratePersistence(this.resultFromStream(worker, turn, driver, input.timeoutSeconds, previousUsage), persistenceError);
+        return this.decoratePersistence(
+          this.streamResult(worker, turn, driver, input.timeoutSeconds, previousUsage),
+          combineWarnings(prePersistError, persistenceError),
+        );
       }
 
       const controller = new AbortController();
       const forwardAbort = () => controller.abort(input.signal?.reason);
       if (input.signal?.aborted) controller.abort(input.signal.reason);
       else input.signal?.addEventListener('abort', forwardAbort, { once: true });
-      const active: ActiveOneShot = { controller };
-      this.activeOneShots.set(worker.workerId, active);
-      const result = await runAgy(
-        executable,
-        buildOneShotArgs(input.prompt, executionOptions(worker), worker.conversationId),
-        worker.cwd,
-        input.timeoutSeconds * 1000,
-        { signal: controller.signal, onSpawn: (child) => { active.child = child; } },
-      );
-      input.signal?.removeEventListener('abort', forwardAbort);
-      this.activeOneShots.delete(worker.workerId);
+      this.activeOneShots.set(worker.workerId, { controller });
+      let result: Awaited<ReturnType<typeof runAgy>>;
+      try {
+        result = await runAgy(
+          executable,
+          buildOneShotArgs(input.prompt, executionOptions(worker), worker.conversationId),
+          worker.cwd,
+          input.timeoutSeconds * 1000,
+          { signal: controller.signal },
+        );
+      } finally {
+        input.signal?.removeEventListener('abort', forwardAbort);
+        this.activeOneShots.delete(worker.workerId);
+      }
       const envelope = parseAgyEnvelope(result);
       if (envelope?.conversation_id) worker.conversationId = envelope.conversation_id;
       worker.lastUsage = envelope?.usage ?? worker.lastUsage;
       worker.lastActivityAt = new Date().toISOString();
       worker.state = result.timedOut || result.canceled ? 'recoverable' : 'ready';
       worker.recovered = false;
-      const turnUsage = usageDelta(envelope?.usage, previousUsage);
       const persistenceError = await this.persist(worker, {
         state: worker.state,
         lastTransport: 'oneshot',
         lastResultStatus: envelope?.status ?? (result.canceled ? 'CANCELED' : result.exitCode === 0 ? 'SUCCESS' : 'ERROR'),
         lastDurationSeconds: envelope?.duration_seconds,
         lastNumTurns: envelope?.num_turns,
-        lastUsage: envelope?.usage,
-        lastTurnUsage: turnUsage,
+        lastUsage: worker.lastUsage,
+        lastTurnUsage: usageDelta(worker.lastUsage, previousUsage),
         lastTimedOut: result.timedOut,
         lastCanceled: result.canceled,
       });
       await this.releaseLease(worker.workerId);
-      return this.decoratePersistence(this.resultFromOneShot(worker, result, input.timeoutSeconds, previousUsage), persistenceError);
+      return this.decoratePersistence(
+        this.oneShotResult(worker, result, input.timeoutSeconds, previousUsage),
+        combineWarnings(prePersistError, persistenceError),
+      );
     } catch (error) {
       this.activeOneShots.delete(worker.workerId);
+      const activeDriver = this.drivers.get(worker.workerId);
+      if (activeDriver) {
+        this.closing.add(worker.workerId);
+        await activeDriver.close().catch(() => undefined);
+        this.closing.delete(worker.workerId);
+        this.drivers.delete(worker.workerId);
+      }
       worker.state = 'recoverable';
       worker.recovered = true;
       worker.lastActivityAt = new Date().toISOString();
-      await this.persist(worker, { state: 'recoverable', lastResultStatus: 'ERROR' });
-      if (!keepLease || !this.drivers.get(worker.workerId)?.isAlive) await this.releaseLease(worker.workerId);
+      await this.persist(worker, { state: 'recoverable', lastResultStatus: 'ERROR', lastDriverPid: undefined });
+      await this.releaseLease(worker.workerId);
       return textError(`Failed to resume Antigravity worker: ${error instanceof Error ? error.message : String(error)}`, {
         workerId: worker.workerId,
         conversationId: worker.conversationId,
@@ -625,27 +612,41 @@ export class WorkerRuntime {
     await this.ensureRecovered();
     const worker = this.workers.get(workerId);
     if (!worker) return textError(`Unknown or closed Antigravity worker: ${workerId}.`, { workerId });
+
     const driver = this.drivers.get(workerId);
     if (driver?.isBusy) {
       const canceled = await driver.cancelCurrentTurn();
       worker.state = 'recoverable';
       worker.recovered = true;
       worker.lastActivityAt = new Date().toISOString();
-      await this.persist(worker, { state: 'recoverable', lastResultStatus: 'CANCELED', lastCanceled: true });
-      return {
-        content: [{ type: 'text', text: canceled ? `Canceled the active turn for ${workerId}. The conversation remains recoverable.` : `No active turn for ${workerId}.` }],
+      const persistenceError = await this.persist(worker, {
+        state: 'recoverable',
+        lastResultStatus: 'CANCELED',
+        lastCanceled: true,
+        lastDriverPid: undefined,
+      });
+      await this.releaseLease(workerId);
+      return this.decoratePersistence({
+        content: [{ type: 'text', text: canceled
+          ? `Canceled the active turn for ${workerId}. The conversation remains recoverable.`
+          : `No active turn for ${workerId}.` }],
         structuredContent: { workerId, conversationId: worker.conversationId, canceled, state: worker.state },
-      };
+      }, persistenceError);
     }
+
     const oneShot = this.activeOneShots.get(workerId);
     if (oneShot) {
       oneShot.controller.abort(new Error('Canceled by agy_cancel'));
-      if (oneShot.child) await terminateChildProcess(oneShot.child).catch(() => undefined);
-      return {
+      worker.state = 'recoverable';
+      worker.recovered = true;
+      worker.lastActivityAt = new Date().toISOString();
+      const persistenceError = await this.persist(worker, { state: 'recoverable', lastResultStatus: 'CANCELED', lastCanceled: true });
+      return this.decoratePersistence({
         content: [{ type: 'text', text: `Cancellation requested for ${workerId}. The conversation remains recoverable.` }],
-        structuredContent: { workerId, conversationId: worker.conversationId, canceled: true, state: 'recoverable' },
-      };
+        structuredContent: { workerId, conversationId: worker.conversationId, canceled: true, state: worker.state },
+      }, persistenceError);
     }
+
     return {
       content: [{ type: 'text', text: `Worker ${workerId} has no turn in progress.` }],
       structuredContent: { workerId, conversationId: worker.conversationId, canceled: false, state: worker.state },
@@ -658,7 +659,10 @@ export class WorkerRuntime {
     if (!worker) {
       const record = await this.store.read(workerId).catch(() => undefined);
       if (record?.closedAt) {
-        return { content: [{ type: 'text', text: `Antigravity worker is already closed: ${workerId}` }], structuredContent: { workerId, conversationId: record.conversationId, closed: true } };
+        return {
+          content: [{ type: 'text', text: `Antigravity worker is already closed: ${workerId}` }],
+          structuredContent: { workerId, conversationId: record.conversationId, closed: true, state: 'closed' },
+        };
       }
       return textError(`Unknown Antigravity worker: ${workerId}.`, { workerId });
     }
@@ -711,6 +715,7 @@ export class WorkerRuntime {
         driverPid: driver?.pid,
         leased: Boolean(lease),
         leaseOwnerPid: lease?.processPid,
+        leaseExpiresAt: lease?.expiresAt,
         cwd: record.cwd,
         model: record.model,
         effort: record.effort,
@@ -728,8 +733,8 @@ export class WorkerRuntime {
     };
 
     if (workerId) {
-      const runtime = this.workers.get(workerId);
       let record = recordMap.get(workerId);
+      const runtime = this.workers.get(workerId);
       if (!record && runtime) {
         await this.persist(runtime);
         record = await this.store.read(workerId);
@@ -743,10 +748,10 @@ export class WorkerRuntime {
     }
 
     const visible = records.filter((record) => includeClosed || !record.closedAt);
-    const workers = await Promise.all(visible.map(describe));
+    const described = await Promise.all(visible.map(describe));
     return {
-      content: [{ type: 'text', text: workers.length > 0 ? `${workers.length} Antigravity worker(s) found.` : 'No Antigravity workers found.' }],
-      structuredContent: { workers, warnings: [...this.recoveryWarnings, ...warnings] },
+      content: [{ type: 'text', text: described.length > 0 ? `${described.length} Antigravity worker(s) found.` : 'No Antigravity workers found.' }],
+      structuredContent: { workers: described, warnings: [...this.recoveryWarnings, ...warnings] },
     };
   }
 
