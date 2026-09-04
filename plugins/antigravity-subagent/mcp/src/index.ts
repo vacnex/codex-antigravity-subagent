@@ -222,5 +222,12 @@ async function createServer(): Promise<McpServer> {
   return server;
 }
 
-process.stderr.write(`agy MCP server ${VERSION} running on stdio\n`);
-await serveStdio(() => createServer());
+async function main(): Promise<void> {
+  process.stderr.write(`agy MCP server ${VERSION} running on stdio\n`);
+  await serveStdio(() => createServer());
+}
+
+void main().catch((error) => {
+  process.stderr.write(`agy MCP server failed: ${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
+  process.exitCode = 1;
+});
