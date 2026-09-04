@@ -8,6 +8,12 @@ import { McpServer, type ServerContext } from '@modelcontextprotocol/server';
 import { serveStdio } from '@modelcontextprotocol/server/stdio';
 import * as z from 'zod/v4';
 
+import {
+  detectAgyStreamingCapabilities,
+  type AgyStreamingCapabilities,
+  type AgyUsage,
+} from './streaming.js';
+
 const VERSION = '0.3.0';
 const MAX_STDOUT_BYTES = 2 * 1024 * 1024;
 const MAX_STDERR_BYTES = 8 * 1024;
@@ -37,14 +43,6 @@ type AgyCapabilities = {
   conversationResume: boolean;
   mode: boolean;
   modelCatalog: boolean;
-};
-
-type AgyUsage = {
-  input_tokens?: number;
-  output_tokens?: number;
-  thinking_tokens?: number;
-  cache_read_tokens?: number;
-  total_tokens?: number;
 };
 
 type AgyEnvelope = {
@@ -312,6 +310,7 @@ function firstNonEmptyLine(...values: string[]): string | undefined {
 async function probeAgyCapabilities(executable: string): Promise<{
   version?: string;
   capabilities: AgyCapabilities;
+  streaming: AgyStreamingCapabilities;
   modelCount?: number;
   baseModelCount?: number;
   warnings: string[];
@@ -327,6 +326,7 @@ async function probeAgyCapabilities(executable: string): Promise<{
 
   const helpResult = await runAgy(executable, ['--help'], cwd, CAPABILITY_TIMEOUT_MS);
   const helpText = `${helpResult.stdout}\n${helpResult.stderr}`;
+  const streaming = detectAgyStreamingCapabilities(helpText);
   if (helpResult.timedOut || helpResult.exitCode !== 0) warnings.push('Could not fully inspect `agy --help`.');
 
   let modelCount: number | undefined;
@@ -351,6 +351,7 @@ async function probeAgyCapabilities(executable: string): Promise<{
       mode: helpText.includes('--mode'),
       modelCatalog,
     },
+    streaming,
     modelCount,
     baseModelCount,
     warnings,
@@ -559,11 +560,13 @@ function createServer(): McpServer {
 
       const report = await probeAgyCapabilities(executable);
       const capabilityEntries = Object.entries(report.capabilities);
+      const streamingEntries = Object.entries(report.streaming);
       const missing = capabilityEntries.filter(([, supported]) => !supported).map(([name]) => name);
       const lines = [
         `Antigravity CLI is available at: ${executable}`,
         report.version ? `Version: ${report.version}` : 'Version: unknown',
         `Capabilities: ${capabilityEntries.map(([name, supported]) => `${name}=${supported ? 'yes' : 'no'}`).join(', ')}`,
+        `Streaming: ${streamingEntries.map(([name, supported]) => `${name}=${supported ? 'yes' : 'no'}`).join(', ')}`,
       ];
       if (report.modelCount !== undefined) {
         lines.push(`Models: ${report.modelCount} variants across ${report.baseModelCount ?? report.modelCount} base models`);
@@ -578,6 +581,7 @@ function createServer(): McpServer {
           executable,
           version: report.version,
           capabilities: report.capabilities,
+          streaming: report.streaming,
           modelCount: report.modelCount,
           baseModelCount: report.baseModelCount,
           warnings: report.warnings,
