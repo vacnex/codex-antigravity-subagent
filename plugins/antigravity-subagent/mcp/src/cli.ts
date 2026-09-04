@@ -200,12 +200,18 @@ export function runAgy(
     let timedOut = false;
     let canceled = false;
     let settled = false;
+    let stopping = false;
+    let timer: NodeJS.Timeout | undefined;
+
+    const cleanup = () => {
+      if (timer) clearTimeout(timer);
+      options.signal?.removeEventListener('abort', onAbort);
+    };
 
     const finish = (exitCode: number | null) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
-      options.signal?.removeEventListener('abort', onAbort);
+      cleanup();
       resolve({
         exitCode,
         stdout: stdout.toString('utf8'),
@@ -216,15 +222,26 @@ export function runAgy(
       });
     };
 
+    const fail = (error: Error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error);
+    };
+
     const stop = async (reason: 'timeout' | 'cancel') => {
+      if (settled || stopping) return;
+      stopping = true;
       if (reason === 'timeout') timedOut = true;
       else canceled = true;
-      await terminateChildProcess(child);
+      try {
+        await terminateChildProcess(child);
+      } finally {
+        stopping = false;
+      }
     };
 
     const onAbort = () => { void stop('cancel'); };
-    if (options.signal?.aborted) void stop('cancel');
-    else options.signal?.addEventListener('abort', onAbort, { once: true });
 
     child.stdout?.on('data', (chunk: Buffer<ArrayBufferLike>) => {
       const appended = appendBounded(stdout, chunk, MAX_STDOUT_BYTES);
@@ -236,10 +253,12 @@ export function runAgy(
       stderr = appended.buffer;
       truncated ||= appended.truncated;
     });
-    child.on('error', reject);
-
-    const timer = setTimeout(() => { void stop('timeout'); }, timeoutMs);
+    child.on('error', fail);
     child.on('close', finish);
+
+    timer = setTimeout(() => { void stop('timeout'); }, timeoutMs);
+    if (options.signal?.aborted) void stop('cancel');
+    else options.signal?.addEventListener('abort', onAbort, { once: true });
   });
 }
 
@@ -479,7 +498,7 @@ export async function chooseModelAndEffort(
     }
   }
 
-  const properties: Record<string, unknown> = {};
+  const properties: Record<string, any> = {};
   const required: string[] = [];
   if (!requestedModel) {
     properties.model = {
