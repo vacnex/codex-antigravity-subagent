@@ -101,6 +101,11 @@ function run(executable, args, cwd, timeoutMs) {
   });
 }
 
+function inferPinnedEffort(model) {
+  const match = model?.match(/-(low|medium|high)$/i);
+  return match?.[1]?.toLowerCase();
+}
+
 const options = parseArgs(process.argv.slice(2));
 if (options.help) {
   process.stdout.write("Usage: agy-delegate.mjs --check | --cwd PATH --prompt-file PATH [--mode plan|default|accept-edits] [--output-format text|json] [--timeout-seconds N] [--agent NAME] [--model NAME] [--effort low|medium|high] [--conversation ID]\n");
@@ -146,11 +151,15 @@ const effort = options.effort;
 if (effort !== undefined && !["low", "medium", "high"].includes(effort)) {
   fail("--effort must be one of: low, medium, high");
 }
+const pinnedEffort = inferPinnedEffort(options.model);
+if (pinnedEffort && effort && pinnedEffort !== effort) {
+  fail(`--model ${options.model} pins effort ${pinnedEffort}; --effort ${effort} conflicts with that model slug`);
+}
 
 const agyArgs = ["--print", prompt, "--output-format", outputFormat, "--mode", mode];
 if (options.agent) agyArgs.push("--agent", options.agent);
 if (options.model) agyArgs.push("--model", options.model);
-if (effort) agyArgs.push("--effort", effort);
+if (effort && !pinnedEffort) agyArgs.push("--effort", effort);
 if (options.conversation) agyArgs.push("--conversation", options.conversation);
 
 const result = await run(executable, agyArgs, workspace, timeoutSeconds * 1000);
