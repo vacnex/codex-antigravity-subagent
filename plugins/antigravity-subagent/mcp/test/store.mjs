@@ -113,7 +113,9 @@ try {
   assert.equal(liveLease?.ownerId, winner);
   await store.releaseLease(initial.workerId, winner);
 
-  const closed = { ...updated, state: 'closed', updatedAt: '2026-09-04T08:10:00.000Z', closedAt: '2026-09-04T08:10:00.000Z' };
+  // Build the next expected record from the actual disk representation. JSON persistence
+  // intentionally omits optional properties whose values are `undefined`.
+  const closed = { ...readUpdated, state: 'closed', updatedAt: '2026-09-04T08:10:00.000Z', closedAt: '2026-09-04T08:10:00.000Z' };
   await store.write(closed);
   assert.deepEqual(await store.read(initial.workerId), closed);
 
