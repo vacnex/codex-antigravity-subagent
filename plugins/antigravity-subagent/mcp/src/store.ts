@@ -166,6 +166,11 @@ export class WorkerStore {
     return path.join(this.rootDir, `${workerId}.lease.json`);
   }
 
+  private reclaimPath(workerId: string): string {
+    assertWorkerId(workerId);
+    return path.join(this.rootDir, `${workerId}.lease.reclaim`);
+  }
+
   private async atomicWrite(target: string, value: unknown): Promise<void> {
     await mkdir(this.rootDir, { recursive: true });
     const temporary = path.join(this.rootDir, `.${path.basename(target)}.${process.pid}.${randomUUID()}.tmp`);
@@ -237,17 +242,9 @@ export class WorkerStore {
     return !Number.isFinite(expiry) || expiry <= now || !pidIsAlive(lease.processPid);
   }
 
-  async acquireLease(
-    workerId: string,
-    ownerId: string,
-    ttlMs = 120_000,
-    attempt = 0,
-  ): Promise<WorkerLeaseResult> {
-    assertWorkerId(workerId);
-    await mkdir(this.rootDir, { recursive: true });
-    const filename = this.leasePath(workerId);
+  private newLease(workerId: string, ownerId: string, ttlMs: number): WorkerLeaseRecord {
     const now = Date.now();
-    const lease: WorkerLeaseRecord = {
+    return {
       schemaVersion: 1,
       workerId,
       ownerId,
@@ -255,27 +252,71 @@ export class WorkerStore {
       acquiredAt: new Date(now).toISOString(),
       expiresAt: new Date(now + ttlMs).toISOString(),
     };
+  }
 
+  private async writeLeaseExclusive(filename: string, lease: WorkerLeaseRecord): Promise<boolean> {
     try {
       await writeFile(filename, `${JSON.stringify(lease, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' });
-      return { acquired: true, lease };
+      return true;
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      if ((error as NodeJS.ErrnoException).code === 'EEXIST') return false;
+      throw error;
+    }
+  }
+
+  private async reclaimLease(workerId: string, ownerId: string, ttlMs: number): Promise<WorkerLeaseResult> {
+    const filename = this.leasePath(workerId);
+    const reclaim = this.reclaimPath(workerId);
+    const marker = `${process.pid}:${randomUUID()}`;
+    try {
+      await writeFile(reclaim, `${marker}\n`, { encoding: 'utf8', flag: 'wx' });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+        return { acquired: false, reason: 'another MCP process is reclaiming this stale worker lease' };
+      }
+      throw error;
     }
 
-    const existing = await this.readLease(workerId);
-    if (!existing) {
+    try {
+      const current = await this.readLease(workerId);
+      if (current && !this.leaseIsStale(current)) {
+        return {
+          acquired: false,
+          lease: current,
+          reason: `worker is leased by MCP process ${current.processPid} until ${current.expiresAt}`,
+        };
+      }
+
       await rm(filename, { force: true });
-      return attempt < 2 ? this.acquireLease(workerId, ownerId, ttlMs, attempt + 1) : { acquired: false, reason: 'lease record is unreadable' };
+      const lease = this.newLease(workerId, ownerId, ttlMs);
+      if (await this.writeLeaseExclusive(filename, lease)) return { acquired: true, lease };
+
+      const winner = await this.readLease(workerId);
+      return {
+        acquired: false,
+        lease: winner,
+        reason: winner
+          ? `worker is leased by MCP process ${winner.processPid} until ${winner.expiresAt}`
+          : 'worker lease was acquired concurrently by another MCP process',
+      };
+    } finally {
+      await rm(reclaim, { force: true }).catch(() => undefined);
     }
-    if (existing.ownerId === ownerId) {
+  }
+
+  async acquireLease(workerId: string, ownerId: string, ttlMs = 120_000): Promise<WorkerLeaseResult> {
+    assertWorkerId(workerId);
+    await mkdir(this.rootDir, { recursive: true });
+    const filename = this.leasePath(workerId);
+    const lease = this.newLease(workerId, ownerId, ttlMs);
+    if (await this.writeLeaseExclusive(filename, lease)) return { acquired: true, lease };
+
+    const existing = await this.readLease(workerId);
+    if (existing?.ownerId === ownerId) {
       await this.refreshLease(workerId, ownerId, ttlMs);
       return { acquired: true, lease: await this.readLease(workerId) ?? existing };
     }
-    if (this.leaseIsStale(existing)) {
-      await rm(filename, { force: true });
-      return attempt < 2 ? this.acquireLease(workerId, ownerId, ttlMs, attempt + 1) : { acquired: false, reason: 'stale lease could not be reclaimed' };
-    }
+    if (!existing || this.leaseIsStale(existing)) return this.reclaimLease(workerId, ownerId, ttlMs);
     return {
       acquired: false,
       lease: existing,
@@ -286,11 +327,10 @@ export class WorkerStore {
   async refreshLease(workerId: string, ownerId: string, ttlMs = 120_000): Promise<boolean> {
     const existing = await this.readLease(workerId);
     if (!existing || existing.ownerId !== ownerId) return false;
-    const now = Date.now();
     await this.atomicWrite(this.leasePath(workerId), {
       ...existing,
       processPid: process.pid,
-      expiresAt: new Date(now + ttlMs).toISOString(),
+      expiresAt: new Date(Date.now() + ttlMs).toISOString(),
     } satisfies WorkerLeaseRecord);
     return true;
   }
