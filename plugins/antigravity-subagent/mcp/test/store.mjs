@@ -26,6 +26,7 @@ try {
     workerId: 'agy_123e4567-e89b-12d3-a456-426614174000',
     conversationId: 'conversation-1',
     name: 'Plan 1 - recovery',
+    idempotencyKey: 'task-20260904-plan-1',
     cwd: 'D:/repo',
     mode: 'accept-edits',
     model: 'gemini-example-high',
@@ -33,14 +34,13 @@ try {
     createdAt,
     updatedAt: createdAt,
     lastActivityAt: createdAt,
-    state: 'ready',
+    state: 'running',
+    activeTurnKind: 'start',
+    activeTurnKey: 'task-20260904-plan-1',
+    activeTurnStartedAt: createdAt,
     lastTransport: 'stream',
     lastDriverPid: 1234,
-    lastResultStatus: 'SUCCESS',
-    lastDurationSeconds: 1.25,
-    lastNumTurns: 1,
-    lastUsage: { input_tokens: 100, output_tokens: 20, thinking_tokens: 10, cache_read_tokens: 5, total_tokens: 135 },
-    lastTurnUsage: { input_tokens: 100, output_tokens: 20, thinking_tokens: 10, cache_read_tokens: 5, total_tokens: 135 },
+    lastResultStatus: 'RUNNING',
     lastTimedOut: false,
     lastCanceled: false,
   };
@@ -54,12 +54,31 @@ try {
     updatedAt: '2026-09-04T08:05:00.000Z',
     lastActivityAt: '2026-09-04T08:05:00.000Z',
     state: 'recoverable',
+    activeTurnKind: undefined,
+    activeTurnKey: undefined,
+    activeTurnStartedAt: undefined,
+    lastTurnKind: 'start',
+    lastTurnKey: 'task-20260904-plan-1',
+    lastTurnCompletedAt: '2026-09-04T08:05:00.000Z',
+    lastResultStatus: 'SUCCESS',
+    lastDurationSeconds: 12.5,
     lastNumTurns: 2,
     lastUsage: { input_tokens: 180, output_tokens: 35, thinking_tokens: 15, cache_read_tokens: 10, total_tokens: 240 },
-    lastTurnUsage: { input_tokens: 80, output_tokens: 15, thinking_tokens: 5, cache_read_tokens: 5, total_tokens: 105 },
+    lastTurnUsage: { input_tokens: 180, output_tokens: 35, thinking_tokens: 15, cache_read_tokens: 10, total_tokens: 240 },
+    lastTimedOut: false,
+    lastCanceled: false,
+    lastError: undefined,
   };
   await store.write(updated);
-  assert.deepEqual(await store.read(initial.workerId), updated);
+  const readUpdated = await store.read(initial.workerId);
+  assert.equal(readUpdated.idempotencyKey, 'task-20260904-plan-1');
+  assert.equal(readUpdated.activeTurnKind, undefined);
+  assert.equal(readUpdated.lastTurnKind, 'start');
+  assert.equal(readUpdated.lastTurnKey, 'task-20260904-plan-1');
+  assert.equal(readUpdated.lastResultStatus, 'SUCCESS');
+
+  assert.equal(isWorkerLedgerRecord({ ...updated, activeTurnKind: 'bogus' }), false);
+  assert.equal(isWorkerLedgerRecord({ ...updated, idempotencyKey: 42 }), false);
 
   const owner1 = 'mcp_owner_1';
   const owner2 = 'mcp_owner_2';
