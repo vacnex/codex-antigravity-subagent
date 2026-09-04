@@ -259,6 +259,11 @@ export class WorkerStore {
     return !Number.isFinite(expiry) || expiry <= now || !pidIsAlive(lease.processPid);
   }
 
+  async readActiveLease(workerId: string): Promise<WorkerLeaseRecord | undefined> {
+    const lease = await this.readLease(workerId);
+    return lease && !this.leaseIsStale(lease) ? lease : undefined;
+  }
+
   private newLease(workerId: string, ownerId: string, ttlMs: number): WorkerLeaseRecord {
     const now = Date.now();
     return {
