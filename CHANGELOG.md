@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.2 - 2026-09-04
+
+- Add read-only `agy_wait` as a passive completion barrier that waits inside the MCP server without sending prompts or owning/canceling the worker. A wait timeout/cancel returns control while the AGY worker continues running.
+- Make running `agy_result` snapshots explicitly say that the existing worker is still running instead of reusing start-style acknowledgement wording.
+- Update the delegation skill with a strict sequential completion contract: a RUNNING worker or passive wait timeout is not a blocker, requested plan steps must finish their wait/review/fix/close loop before Codex returns a final answer, and model-driven sleep/result polling should be replaced by `agy_wait`.
+- Expand real-MCP smoke coverage to use `agy_wait` as the completion barrier for managed start/follow-up turns.
+
 ## 0.4.1 - 2026-09-04
 
 - Change persistent managed `agy_start` to return after the AGY stream init/conversation handshake and durable `state=running` registration, while the long first turn continues in the background.
@@ -44,7 +51,7 @@
 ## 0.2.0 - 2026-08-01
 
 - Add the `agy_check` and `agy_delegate` stdio MCP tools.
-- Add the `$delegate-to-antigravity` Codex skill.
+- Add `$delegate-to-antigravity` Codex skill.
 - Default delegation to `plan` mode.
 - Add bounded timeouts and output capture.
 - Bundle the Node.js runtime artifact for installation without `npm install`.

@@ -16,15 +16,35 @@ Prefer managed workers for implementation or any task likely to need review corr
 3. Start the bounded plan step with `agy_start`, passing the stable `idempotencyKey` plus a short friendly `name`, for example `Plan 2 - persistence layer`.
 4. Unless both values were supplied explicitly, let the MCP client ask the user to choose the Antigravity base model and reasoning effort. Do not silently invent either choice. A retry matched by `idempotencyKey` is resolved before model elicitation, so it must not ask again.
 5. On a persistent-stream capable AGY, `agy_start` returns after the stream handshake and durable worker registration, while the first Antigravity turn continues in the background. Treat `state=running` / `done=false` as an accepted launch, not as a completed task. Keep the returned `workerId` and `conversationId`.
-6. Use `agy_result(workerId)` to read the latest turn state. If `done=false`, do not start another worker and do not send a follow-up. `agy_status(workerId)` may be used for lifecycle/progress metadata. Avoid repeated shell/cell wait loops whose only purpose is to keep Codex awake while AGY is running; do useful independent work or check the managed result again when appropriate.
-7. When `agy_result` reports `done=true`, inspect the shared workspace diff and run relevant tests independently. The delegated response is advisory; the workspace and Codex review are the source of truth.
-8. If review fails, choose a stable correction `idempotencyKey` for that specific correction turn and call `agy_followup` with the same `workerId`. Persistent follow-ups also launch in the background. Use `agy_result` for completion, review again, and repeat with a new correction key only when a genuinely new correction turn is needed. If a follow-up tool response is lost, retry with the same correction key.
+6. For normal orchestration, call `agy_wait(workerId)` after a successful background launch. `agy_wait` is a passive completion barrier: it sends no prompt and does not own or cancel the worker. If it returns `done=false` because the passive wait interval elapsed, the worker is still running; call `agy_wait` again rather than ending the task, starting another worker, or treating the wait timeout as a blocker. Use `agy_result(workerId)` only when an immediate non-blocking snapshot is actually useful. Use `agy_status(workerId)` for lifecycle/progress metadata.
+7. When `agy_wait` or `agy_result` reports `done=true`, inspect the shared workspace diff and run relevant tests independently. The delegated response is advisory; the workspace and Codex review are the source of truth.
+8. If review fails, choose a stable correction `idempotencyKey` for that specific correction turn and call `agy_followup` with the same `workerId`. Persistent follow-ups also launch in the background. Call `agy_wait` for that correction turn, review again, and repeat with a new correction key only when a genuinely new correction turn is needed. If a follow-up tool response is lost, retry with the same correction key.
 9. Use `agy_status` when worker state is uncertain, especially after a Codex/MCP restart. A persisted open worker may be `recoverable`; `agy_followup` resumes its exact `conversationId`. A turn that was active when MCP died is recovered as interrupted/recoverable rather than being reported as a ghost running turn.
-10. If the current turn is no longer useful, call `agy_cancel(workerId)`. Cancellation targets the active background turn and keeps the conversation recoverable. Once a background launch has returned, explicit `agy_cancel` is the cancellation mechanism; there is no longer an active MCP request whose cancellation can control that turn.
+10. If the current turn is no longer useful, call `agy_cancel(workerId)`. Cancellation targets the active background turn and keeps the conversation recoverable. Once a background launch has returned, explicit `agy_cancel` is the cancellation mechanism; canceling an `agy_wait` call must never be treated as permission to cancel the worker itself.
 11. Call `agy_close` only after the worker passes review. Closing marks the worker closed in the local ledger; it does not delete the Antigravity conversation or its audit history.
 12. For a distinct plan step, start a new worker with a new logical idempotency key rather than reusing the previous worker's context.
 
-For sequential multi-step plans, use one Antigravity worker per plan step. Finish the result/review/fix loop for the current step before starting the next one unless the user explicitly requests parallel work.
+For sequential multi-step plans, use one Antigravity worker per plan step. Finish the wait/result/review/fix/close loop for the current step before starting the next one unless the user explicitly requests parallel work.
+
+## Sequential completion contract
+
+When the user asked to execute a finite multi-step plan, do not produce the final user response while any requested plan step is incomplete or while the current plan step still has a running worker turn.
+
+A `RUNNING` worker is not a blocker. An `agy_wait` interval ending with `done=false` is not a blocker. Continue with another passive `agy_wait` call unless the user explicitly stops the work or a genuine external condition requires user input.
+
+For each requested plan step, complete this sequence before proceeding:
+
+1. `agy_start` with a stable step key.
+2. `agy_wait` until the turn reaches a terminal result.
+3. Independently review the diff and run the required validation.
+4. On review failure, `agy_followup` with a stable correction key, then `agy_wait` again.
+5. Repeat review/correction until PASS, or until a genuine BLOCKED condition requires user action.
+6. `agy_close` only after PASS.
+7. Move to the next requested plan step.
+
+Only finish the user-facing turn after all requested plan steps have either PASSed or reached a genuine BLOCKED condition that cannot be resolved without user input. Do not substitute a progress/status summary for completion merely because a background worker is still running.
+
+Do not orchestrate long AGY work with repeated shell sleeps, terminal wait commands, or frequent `agy_result` polling. Use `agy_wait` so the MCP server waits internally without repeatedly waking the Codex model and re-reading the conversation context.
 
 ## Retry and duplicate safety
 
@@ -40,7 +60,7 @@ Managed workers persist metadata outside the plugin installation directory, unde
 
 A warm worker uses Antigravity persistent `stream-json` input/output when the installed CLI supports it. The MCP layer waits only for the initial stream handshake, persists `conversationId` plus `state=running`, and then starts the long turn. This ordering ensures `agy_status` can find the worker immediately even if a later client/tool timeout or connection failure occurs.
 
-Successful background turn responses are kept only in the current MCP process memory so `agy_result` can return them without bloating the durable ledger. If Codex/MCP restarts after a turn has completed, the response text is intentionally unavailable from the plugin ledger; `agy_result` returns persisted completion/status/usage metadata with `resultAvailable=false`, and Codex should inspect the workspace directly. Antigravity's own conversation remains available for manual audit.
+Successful background turn responses are kept only in the current MCP process memory so `agy_result` and `agy_wait` can return them without bloating the durable ledger. If Codex/MCP restarts after a turn has completed, the response text is intentionally unavailable from the plugin ledger; result/wait calls return persisted completion/status/usage metadata with `resultAvailable=false`, and Codex should inspect the workspace directly. Antigravity's own conversation remains available for manual audit.
 
 If Codex/MCP restarts or a warm process is lost, the worker becomes recoverable. The next follow-up starts a new AGY process with the exact persisted `--conversation <id>`. If MCP restarts while a turn is marked running, recovery clears the stale active-turn marker and records it as interrupted/recoverable instead of pretending that a vanished process is still working.
 
@@ -48,13 +68,15 @@ A cross-process worker lease prevents two MCP instances from driving the same wo
 
 Idle warm processes may be released automatically while the logical worker remains recoverable. This is normal and does not close the worker.
 
-## Status, result, and cancellation
+## Status, result, wait, and cancellation
 
 `agy_status` with a `workerId` returns lifecycle information for one worker. Without a worker ID it lists open workers; `includeClosed=true` also includes ledger history. Status metadata may include whether the worker is warm, the active driver PID, lease state, active/last turn keys, last result status, timeout/cancel/error flags, turn count, usage, compact progress counters, and duplicate-worker IDs.
 
-`agy_result(workerId)` never sends a prompt. During an active turn it returns `done=false`. Once the current MCP process receives the final AGY result it returns `done=true`, the bounded final response, and structured usage/status metadata. After an MCP restart it can still report persisted completion metadata, but final response text is not reconstructed from the ledger.
+`agy_result(workerId)` never sends a prompt and never waits. During an active turn it returns `done=false` with an immediate running snapshot. Once the current MCP process receives the final AGY result it returns `done=true`, the bounded final response, and structured usage/status metadata. After an MCP restart it can still report persisted completion metadata, but final response text is not reconstructed from the ledger.
 
-`agy_cancel` targets only an active turn. After cancellation the worker remains available for a later `agy_followup`. MCP request cancellation is still honored while a start/follow-up stream handshake or a blocking one-shot call is itself in progress; after a background managed call has returned, use `agy_cancel` explicitly.
+`agy_wait(workerId, timeoutSeconds)` also never sends a prompt. It waits inside the MCP server for the latest managed turn to become terminal, so Codex does not need repeated model-driven polling. The wait itself does not own the worker. If the passive wait interval ends or the MCP client cancels only the wait request, the worker continues running and can be awaited again. The bundled wait limit stays below the MCP tool timeout so the server can return a clean `done=false` continuation state before the client deadline.
+
+`agy_cancel` targets only an active turn. After cancellation the worker remains available for a later `agy_followup`. MCP request cancellation is still honored while a start/follow-up stream handshake or a blocking one-shot call is itself in progress; after a background managed call has returned, use `agy_cancel` explicitly. Canceling `agy_wait` must not implicitly cancel the AGY turn.
 
 ## One-shot delegation
 
@@ -75,6 +97,8 @@ Do not ask for model or effort again on `agy_followup`; the existing worker keep
 ## Managed result handling
 
 Managed start/follow-up acknowledgements are intentionally compact. Preserve `workerId`, `conversationId`, state, transport, and the logical idempotency key. Do not mistake an acknowledgement for the final worker response.
+
+Use `agy_wait` as the default completion barrier for sequential orchestration. Use `agy_result` only for a deliberate immediate snapshot. A running snapshot should say that the worker is still running; do not interpret it as a new start acknowledgement or as evidence that the plan step may be skipped.
 
 Final managed results preserve useful metadata such as status, lifecycle state, duration, number of turns, transport, timeout/cancel flags, and token usage, but do not dump Antigravity progress diagnostics into Codex context on successful runs.
 
@@ -104,7 +128,7 @@ node <skill-dir>/scripts/agy-delegate.mjs --cwd <absolute-workspace> --mode plan
 
 To resume a known Antigravity conversation through the fallback runner, add `--conversation <conversation-id>`.
 
-The runner accepts `--output-format text|json`, `--timeout-seconds 1..1800`, `--agent`, `--model`, `--effort`, and `--conversation`. It avoids passing a duplicate `--effort` flag when the chosen model slug already pins the effort. The fallback runner does not provide the managed worker registry, idempotency, leases, status/result/cancel tools, or MCP picker.
+The runner accepts `--output-format text|json`, `--timeout-seconds 1..1800`, `--agent`, `--model`, `--effort`, and `--conversation`. It avoids passing a duplicate `--effort` flag when the chosen model slug already pins the effort. The fallback runner does not provide the managed worker registry, idempotency, leases, status/result/wait/cancel tools, or MCP picker.
 
 Delete the temporary prompt file after the runner finishes. Do not add or emulate dangerous permission-bypass flags.
 
