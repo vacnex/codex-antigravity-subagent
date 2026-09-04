@@ -1,9 +1,10 @@
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { access } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import path from 'node:path';
 
-import { McpServer } from '@modelcontextprotocol/server';
+import { McpServer, type ServerContext } from '@modelcontextprotocol/server';
 import { serveStdio } from '@modelcontextprotocol/server/stdio';
 import * as z from 'zod/v4';
 
@@ -12,10 +13,40 @@ const MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
 const MODEL_LIST_TIMEOUT_MS = 15_000;
 
 type Effort = 'low' | 'medium' | 'high';
+type RunMode = 'plan' | 'default' | 'accept-edits';
 
 type ModelOption = {
   slug: string;
   label: string;
+};
+
+type AgyUsage = {
+  input_tokens?: number;
+  output_tokens?: number;
+  thinking_tokens?: number;
+  cache_read_tokens?: number;
+  total_tokens?: number;
+};
+
+type AgyEnvelope = {
+  conversation_id: string;
+  status: string;
+  response: string;
+  error?: string;
+  duration_seconds?: number;
+  num_turns?: number;
+  usage?: AgyUsage;
+};
+
+type WorkerState = {
+  workerId: string;
+  conversationId: string;
+  cwd: string;
+  mode: RunMode;
+  agent?: string;
+  model: string;
+  effort: Effort;
+  createdAt: string;
 };
 
 async function isExecutable(candidate: string): Promise<boolean> {
@@ -152,7 +183,7 @@ async function listAgyModels(executable: string, cwd: string): Promise<ModelOpti
 }
 
 async function chooseModelAndEffort(
-  ctx: { mcpReq: { elicitInput: (params: unknown) => Promise<{ action: string; content?: Record<string, unknown> }> } },
+  ctx: ServerContext,
   executable: string,
   cwd: string,
   requestedModel?: string,
@@ -220,12 +251,71 @@ async function chooseModelAndEffort(
   }
 }
 
+function parseAgyEnvelope(result: RunResult): AgyEnvelope | undefined {
+  try {
+    const parsed = JSON.parse(result.stdout) as Partial<AgyEnvelope>;
+    if (typeof parsed.status !== 'string' || typeof parsed.response !== 'string' || typeof parsed.conversation_id !== 'string') return undefined;
+    return parsed as AgyEnvelope;
+  } catch {
+    return undefined;
+  }
+}
+
+function buildManagedArgs(prompt: string, worker: Omit<WorkerState, 'workerId' | 'conversationId' | 'createdAt'>, conversationId?: string): string[] {
+  const args = [
+    '--print', prompt,
+    '--output-format', 'json',
+    '--mode', worker.mode,
+    '--model', worker.model,
+    '--effort', worker.effort,
+  ];
+  if (worker.agent) args.push('--agent', worker.agent);
+  if (conversationId) args.push('--conversation', conversationId);
+  return args;
+}
+
+function managedResult(
+  result: RunResult,
+  envelope: AgyEnvelope | undefined,
+  worker: WorkerState | undefined,
+  timeoutSeconds: number,
+) {
+  const response = envelope?.response?.trim() || '';
+  const error = envelope?.error?.trim() || '';
+  const fallbackError = result.stderr.trim() || result.stdout.trim();
+  const text = result.timedOut
+    ? `Antigravity timed out after ${timeoutSeconds} seconds.`
+    : response || error || fallbackError || '(Antigravity returned no output)';
+  const isError = result.timedOut || result.exitCode !== 0 || (envelope !== undefined && envelope.status !== 'SUCCESS');
+
+  return {
+    content: [{ type: 'text' as const, text }],
+    structuredContent: {
+      workerId: worker?.workerId,
+      conversationId: worker?.conversationId ?? envelope?.conversation_id || undefined,
+      status: envelope?.status ?? (isError ? 'ERROR' : 'SUCCESS'),
+      model: worker?.model,
+      effort: worker?.effort,
+      mode: worker?.mode,
+      cwd: worker?.cwd,
+      durationSeconds: envelope?.duration_seconds,
+      numTurns: envelope?.num_turns,
+      usage: envelope?.usage,
+      exitCode: result.exitCode,
+      timedOut: result.timedOut,
+      truncated: result.truncated,
+    },
+    isError,
+  };
+}
+
 function createServer(): McpServer {
+  const workers = new Map<string, WorkerState>();
   const server = new McpServer(
     { name: 'agy-mcp-server', version: VERSION },
     {
       instructions:
-        'Use agy_check before first delegation. Default agy_delegate to plan mode. Verify delegated output and workspace changes independently.',
+        'Use agy_check before first delegation. Use agy_start for resumable work, agy_followup for corrections, and agy_close after the worker passes review. Verify delegated output and workspace changes independently.',
     },
   );
 
@@ -261,7 +351,7 @@ function createServer(): McpServer {
     'agy_delegate',
     {
       title: 'Delegate to Antigravity',
-      description: 'Run one bounded prompt through Google Antigravity CLI in non-interactive print mode and return the result.',
+      description: 'Run one bounded one-shot prompt through Google Antigravity CLI. Prefer agy_start when follow-up review may be needed.',
       inputSchema: z.object({
         prompt: z.string().min(1).max(100_000).describe('Complete bounded task prompt'),
         cwd: z.string().min(1).describe('Absolute existing workspace directory'),
@@ -335,6 +425,138 @@ function createServer(): McpServer {
           isError: true,
         };
       }
+    },
+  );
+
+  server.registerTool(
+    'agy_start',
+    {
+      title: 'Start Antigravity Worker',
+      description: 'Start a resumable Antigravity worker conversation. Use the returned workerId for review corrections with agy_followup.',
+      inputSchema: z.object({
+        prompt: z.string().min(1).max(100_000).describe('Complete bounded task prompt'),
+        cwd: z.string().min(1).describe('Absolute existing workspace directory'),
+        mode: z.enum(['plan', 'default', 'accept-edits']).default('accept-edits'),
+        timeoutSeconds: z.number().int().min(1).max(1800).default(900),
+        agent: z.string().min(1).max(200).optional(),
+        model: z.string().min(1).max(200).optional().describe('Antigravity model slug. If omitted, ask the user to choose.'),
+        effort: z.enum(['low', 'medium', 'high']).optional().describe('Reasoning effort. If omitted, ask the user to choose.'),
+      }),
+      annotations: {
+        readOnlyHint: false,
+        openWorldHint: true,
+        destructiveHint: true,
+        idempotentHint: false,
+      },
+    },
+    async ({ prompt, cwd, mode, timeoutSeconds, agent, model, effort }, ctx) => {
+      const executable = await findAgy();
+      if (!executable) return { content: [{ type: 'text', text: 'Antigravity CLI was not found. Run agy_check first.' }], isError: true };
+
+      const resolvedCwd = path.resolve(cwd);
+      try {
+        await access(resolvedCwd, constants.R_OK);
+      } catch {
+        return { content: [{ type: 'text', text: `Workspace is not accessible: ${resolvedCwd}` }], isError: true };
+      }
+
+      const selection = await chooseModelAndEffort(ctx, executable, resolvedCwd, model, effort);
+      if ('error' in selection) return { content: [{ type: 'text', text: selection.error }], isError: true };
+
+      const baseWorker = { cwd: resolvedCwd, mode, agent, model: selection.model, effort: selection.effort };
+      try {
+        const result = await runAgy(executable, buildManagedArgs(prompt, baseWorker), resolvedCwd, timeoutSeconds * 1000);
+        const envelope = parseAgyEnvelope(result);
+        let worker: WorkerState | undefined;
+        if (envelope?.conversation_id) {
+          worker = {
+            workerId: `agy_${randomUUID()}`,
+            conversationId: envelope.conversation_id,
+            ...baseWorker,
+            createdAt: new Date().toISOString(),
+          };
+          workers.set(worker.workerId, worker);
+        }
+        return managedResult(result, envelope, worker, timeoutSeconds);
+      } catch (error) {
+        return { content: [{ type: 'text', text: `Failed to start Antigravity: ${error instanceof Error ? error.message : String(error)}` }], isError: true };
+      }
+    },
+  );
+
+  server.registerTool(
+    'agy_followup',
+    {
+      title: 'Follow Up Antigravity Worker',
+      description: 'Send review feedback or a correction to an existing Antigravity worker conversation using the same model, effort, and workspace.',
+      inputSchema: z.object({
+        workerId: z.string().min(1),
+        prompt: z.string().min(1).max(100_000).describe('Review feedback or correction for the existing worker'),
+        timeoutSeconds: z.number().int().min(1).max(1800).default(900),
+      }),
+      annotations: {
+        readOnlyHint: false,
+        openWorldHint: true,
+        destructiveHint: true,
+        idempotentHint: false,
+      },
+    },
+    async ({ workerId, prompt, timeoutSeconds }) => {
+      const worker = workers.get(workerId);
+      if (!worker) {
+        return {
+          content: [{ type: 'text', text: `Unknown or closed Antigravity worker: ${workerId}. Start a new worker with agy_start.` }],
+          isError: true,
+        };
+      }
+      const executable = await findAgy();
+      if (!executable) return { content: [{ type: 'text', text: 'Antigravity CLI was not found. Run agy_check first.' }], isError: true };
+
+      try {
+        const baseWorker = { cwd: worker.cwd, mode: worker.mode, agent: worker.agent, model: worker.model, effort: worker.effort };
+        const result = await runAgy(
+          executable,
+          buildManagedArgs(prompt, baseWorker, worker.conversationId),
+          worker.cwd,
+          timeoutSeconds * 1000,
+        );
+        const envelope = parseAgyEnvelope(result);
+        if (envelope?.conversation_id && envelope.conversation_id !== worker.conversationId) {
+          worker.conversationId = envelope.conversation_id;
+        }
+        return managedResult(result, envelope, worker, timeoutSeconds);
+      } catch (error) {
+        return { content: [{ type: 'text', text: `Failed to resume Antigravity worker: ${error instanceof Error ? error.message : String(error)}` }], isError: true };
+      }
+    },
+  );
+
+  server.registerTool(
+    'agy_close',
+    {
+      title: 'Close Antigravity Worker',
+      description: 'Forget a managed worker after review passes. This does not delete the Antigravity conversation, so it remains available through `agy /resume` or `agy --conversation <id>`.',
+      inputSchema: z.object({ workerId: z.string().min(1) }),
+      annotations: {
+        readOnlyHint: false,
+        openWorldHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+      },
+    },
+    async ({ workerId }) => {
+      const worker = workers.get(workerId);
+      if (!worker) {
+        return {
+          content: [{ type: 'text', text: `Antigravity worker is already closed or unknown: ${workerId}` }],
+          structuredContent: { workerId, closed: false },
+        };
+      }
+      workers.delete(workerId);
+      return {
+        content: [{ type: 'text', text: `Closed ${workerId}. Antigravity conversation ${worker.conversationId} remains resumable.` }],
+        structuredContent: { workerId, conversationId: worker.conversationId, closed: true },
+      };
     },
   );
 
