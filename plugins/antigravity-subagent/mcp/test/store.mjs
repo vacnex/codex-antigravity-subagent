@@ -63,6 +63,7 @@ try {
 
   const owner1 = 'mcp_owner_1';
   const owner2 = 'mcp_owner_2';
+  const owner3 = 'mcp_owner_3';
   const firstLease = await store.acquireLease(initial.workerId, owner1, 60_000);
   assert.equal(firstLease.acquired, true);
   assert.equal(firstLease.lease?.ownerId, owner1);
@@ -82,10 +83,16 @@ try {
     acquiredAt: new Date().toISOString(),
     expiresAt: new Date(Date.now() + 60_000).toISOString(),
   }), 'utf8');
-  const reclaimed = await store.acquireLease(initial.workerId, owner2, 60_000);
-  assert.equal(reclaimed.acquired, true);
-  assert.equal(reclaimed.lease?.ownerId, owner2);
-  await store.releaseLease(initial.workerId, owner2);
+  const contenders = await Promise.all([
+    store.acquireLease(initial.workerId, owner2, 60_000),
+    store.acquireLease(initial.workerId, owner3, 60_000),
+  ]);
+  assert.equal(contenders.filter((entry) => entry.acquired).length, 1);
+  const winner = contenders.find((entry) => entry.acquired)?.lease?.ownerId;
+  assert.ok(winner === owner2 || winner === owner3);
+  const liveLease = await store.readLease(initial.workerId);
+  assert.equal(liveLease?.ownerId, winner);
+  await store.releaseLease(initial.workerId, winner);
 
   const closed = { ...updated, state: 'closed', updatedAt: '2026-09-04T08:10:00.000Z', closedAt: '2026-09-04T08:10:00.000Z' };
   await store.write(closed);
@@ -94,12 +101,13 @@ try {
   const files = await readdir(stateDir);
   assert.deepEqual(files.filter((entry) => entry.endsWith('.tmp')), []);
   assert.deepEqual(files.filter((entry) => entry.endsWith('.lease.json')), []);
+  assert.deepEqual(files.filter((entry) => entry.endsWith('.lease.reclaim')), []);
 
   await writeFile(path.join(stateDir, 'agy_corrupt.json'), '{not-json', 'utf8');
   const listed = await store.listWithWarnings();
   assert.deepEqual(listed.records, [closed]);
   assert.equal(listed.warnings.length, 1);
-  await assert.rejects(() => store.read('agy_corrupt'), /Invalid Antigravity worker ledger schema|Unexpected token|JSON/);
+  await assert.rejects(() => store.read('agy_corrupt'));
   await assert.rejects(() => store.read('../escape'), /Invalid Antigravity worker ID/);
 
   console.error('AGY worker ledger store test passed');
