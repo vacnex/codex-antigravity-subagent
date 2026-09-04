@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -8,7 +10,16 @@ import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const serverPath = path.resolve(here, '../dist/server.cjs');
 const protocolOnly = process.argv.includes('--protocol-only');
-const transport = new StdioClientTransport({ command: process.execPath, args: [serverPath] });
+const stateDir = await mkdtemp(path.join(os.tmpdir(), 'agy-mcp-smoke-state-'));
+const childEnv = Object.fromEntries(
+  Object.entries(process.env).filter(([, value]) => typeof value === 'string'),
+);
+childEnv.AGY_MCP_STATE_DIR = stateDir;
+const transport = new StdioClientTransport({
+  command: process.execPath,
+  args: [serverPath],
+  env: childEnv,
+});
 const client = new Client(
   { name: 'agy-mcp-smoke-test', version: '1.0.0' },
   { capabilities: { elicitation: { form: {} } } },
@@ -20,6 +31,10 @@ function assertToolSucceeded(name, result) {
     true,
     `${name} failed:\n${JSON.stringify(result, null, 2)}`,
   );
+}
+
+async function readLedger(workerId) {
+  return JSON.parse(await readFile(path.join(stateDir, `${workerId}.json`), 'utf8'));
 }
 
 client.setRequestHandler('elicitation/create', async (request) => {
@@ -93,6 +108,7 @@ try {
     assert.equal(typeof started.structuredContent?.conversationId, 'string');
     assert.ok(['low', 'medium', 'high'].includes(started.structuredContent?.effort));
     assert.equal(typeof started.structuredContent?.model, 'string');
+    assert.equal(started.structuredContent?.ledgerPersisted, true);
 
     const streamingExpected = check.structuredContent.streaming.persistentDriver === true;
     assert.equal(started.structuredContent?.transport, streamingExpected ? 'stream' : 'oneshot');
@@ -106,6 +122,16 @@ try {
     const driverPid = started.structuredContent.driverPid;
     const startTurns = started.structuredContent.numTurns;
     const startUsage = started.structuredContent.usage?.total_tokens;
+
+    const startedLedger = await readLedger(workerId);
+    assert.equal(startedLedger.schemaVersion, 1);
+    assert.equal(startedLedger.workerId, workerId);
+    assert.equal(startedLedger.conversationId, conversationId);
+    assert.equal(startedLedger.lastTransport, streamingExpected ? 'stream' : 'oneshot');
+    assert.equal(startedLedger.closedAt, undefined);
+    assert.equal('prompt' in startedLedger, false);
+    assert.equal('response' in startedLedger, false);
+
     const followedUp = await client.callTool({
       name: 'agy_followup',
       arguments: {
@@ -119,6 +145,7 @@ try {
     assert.equal(followedUp.structuredContent?.workerId, workerId);
     assert.equal(followedUp.structuredContent?.conversationId, conversationId);
     assert.equal(followedUp.structuredContent?.transport, streamingExpected ? 'stream' : 'oneshot');
+    assert.equal(followedUp.structuredContent?.ledgerPersisted, true);
     if (streamingExpected) {
       assert.equal(followedUp.structuredContent?.driverPid, driverPid);
       if (typeof startTurns === 'number' && typeof followedUp.structuredContent?.numTurns === 'number') {
@@ -129,12 +156,30 @@ try {
       }
     }
 
+    const followedLedger = await readLedger(workerId);
+    assert.equal(followedLedger.conversationId, conversationId);
+    assert.equal(followedLedger.lastTransport, streamingExpected ? 'stream' : 'oneshot');
+    if (typeof followedUp.structuredContent?.numTurns === 'number') {
+      assert.equal(followedLedger.lastNumTurns, followedUp.structuredContent.numTurns);
+    }
+    if (typeof followedUp.structuredContent?.usage?.total_tokens === 'number') {
+      assert.equal(followedLedger.lastUsage?.total_tokens, followedUp.structuredContent.usage.total_tokens);
+    }
+
     const closed = await client.callTool({ name: 'agy_close', arguments: { workerId } });
     assertToolSucceeded('agy_close', closed);
     assert.equal(closed.structuredContent?.closed, true);
     assert.equal(closed.structuredContent?.conversationId, conversationId);
+    assert.equal(closed.structuredContent?.ledgerPersisted, true);
+
+    const closedLedger = await readLedger(workerId);
+    assert.equal(closedLedger.conversationId, conversationId);
+    assert.equal(typeof closedLedger.closedAt, 'string');
+    assert.equal(closedLedger.lastTransport, followedLedger.lastTransport);
+    assert.equal(closedLedger.lastNumTurns, followedLedger.lastNumTurns);
   }
   console.error('MCP smoke test passed');
 } finally {
   await client.close();
+  await rm(stateDir, { recursive: true, force: true });
 }
