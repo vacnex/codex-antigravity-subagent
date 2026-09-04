@@ -52,7 +52,14 @@ lines.on('line', async (line) => {
   const pid = driver.pid;
   assert.equal(typeof pid, 'number');
 
-  const first = await driver.send('first', 2_000);
+  const init = await driver.waitForInit(1_000);
+  assert.equal(init?.conversationId, 'driver-conversation-1');
+  assert.equal(driver.currentConversationId, 'driver-conversation-1');
+  assert.equal(driver.isBusy, false);
+
+  const firstPromise = driver.send('first', 2_000);
+  assert.equal(driver.isBusy, true);
+  const first = await firstPromise;
   assert.equal(first.timedOut, false);
   assert.equal(first.canceled, false);
   assert.equal(first.result?.conversationId, 'driver-conversation-1');
@@ -69,6 +76,7 @@ lines.on('line', async (line) => {
   assert.equal(driver.pid, pid);
   assert.equal(events.filter((event) => event.event === 'init').length, 1);
   assert.equal(events.filter((event) => event.event === 'result').length, 2);
+  assert.equal((await driver.waitForInit(1))?.conversationId, 'driver-conversation-1');
 
   const slow = driver.send('slow', 2_000);
   assert.equal(driver.isBusy, true);
@@ -77,8 +85,10 @@ lines.on('line', async (line) => {
   assert.equal(driver.isBusy, false);
   await driver.close();
   assert.equal(driver.isAlive, false);
+  assert.equal(await driver.waitForInit(1), init);
 
   const cancelDriver = new AgyPersistentDriver({ command: process.execPath, args: [fakeAgy], cwd: tempDir });
+  assert.equal((await cancelDriver.waitForInit(1_000))?.conversationId, 'driver-conversation-1');
   const canceledTurn = cancelDriver.send('cancel-me', 15_000);
   await sleep(100);
   assert.equal(cancelDriver.isBusy, true);
@@ -90,6 +100,7 @@ lines.on('line', async (line) => {
   assert.equal(cancelDriver.isAlive, false);
 
   const signalDriver = new AgyPersistentDriver({ command: process.execPath, args: [fakeAgy], cwd: tempDir });
+  assert.equal((await signalDriver.waitForInit(1_000))?.conversationId, 'driver-conversation-1');
   const controller = new AbortController();
   const signaledTurn = signalDriver.send('cancel-me', 15_000, controller.signal);
   await sleep(100);
@@ -98,6 +109,12 @@ lines.on('line', async (line) => {
   assert.equal(signaled.canceled, true);
   await sleep(100);
   assert.equal(signalDriver.isAlive, false);
+
+  const neverInit = path.join(tempDir, 'never-init.mjs');
+  await writeFile(neverInit, `setTimeout(() => {}, 10_000);`, 'utf8');
+  const noInitDriver = new AgyPersistentDriver({ command: process.execPath, args: [neverInit], cwd: tempDir });
+  assert.equal(await noInitDriver.waitForInit(20), undefined);
+  await noInitDriver.close(10);
 
   console.error('AGY persistent driver test passed');
 } finally {

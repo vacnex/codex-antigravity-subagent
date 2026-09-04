@@ -12,8 +12,9 @@ Use your locally authenticated Google Antigravity CLI (`agy`) as an external del
 
 - `agy_check` verifies the Antigravity CLI, model catalog, required headless flags, and persistent `stream-json` support. Short-lived discovery caches can be bypassed with `refresh=true`.
 - `agy_delegate` runs one bounded one-shot Antigravity prompt and honors MCP cancellation.
-- `agy_start` starts a named resumable worker and returns both a bridge `workerId` and Antigravity `conversationId`.
-- `agy_followup` reuses the same warm AGY process when possible, or resumes the exact persisted conversation after restart/process loss.
+- `agy_start` starts a named resumable worker and returns both a bridge `workerId` and Antigravity `conversationId` after the stream handshake while the long first turn continues in the background.
+- `agy_followup` launches a correction turn on the same worker in the background, reusing the same warm AGY process when possible or resuming the exact persisted conversation after restart/process loss.
+- `agy_result` reads the current/final state of the latest managed turn without sending another prompt. Final response text is kept only in MCP memory and is never written to the durable ledger.
 - `agy_status` shows active, recoverable, or closed worker metadata without reading stored prompts/responses (because the ledger never stores them).
 - `agy_cancel` stops the active turn while preserving the worker conversation for later recovery.
 - `agy_close` closes the managed worker while retaining local audit metadata and the Antigravity conversation.
@@ -48,50 +49,62 @@ Because this plugin declares a local MCP server, imported ChatGPT plugins can be
 Codex plan step
    │
    ▼
-agy_start(name="Plan 2 - persistence")
+agy_start(name="Plan 2 - persistence", idempotencyKey="plan-2")
    │
    ▼
-Antigravity worker A
+worker registered as running
    │
-   ▼
-Codex reviews diff/tests
-   │
-   ├── FAIL ──► agy_followup(worker A) ──► review again
-   │
-   ├── STOP ──► agy_cancel(worker A) ──► recover later
-   │
-   └── PASS ──► agy_close(worker A)
-                    │
-                    ▼
-               next plan step
-                    │
-                    ▼
-               new worker B
+   ├─► agy_status(worker A)  ─► running/progress metadata
+   └─► agy_result(worker A)  ─► running or final response
+                                  │
+                                  ▼
+                          Codex reviews diff/tests
+                                  │
+             ┌────────────────────┼────────────────────┐
+             │                    │                    │
+            FAIL                 STOP                 PASS
+             │                    │                    │
+             ▼                    ▼                    ▼
+agy_followup(worker A,       agy_cancel(worker A)  agy_close(worker A)
+idempotencyKey="plan-2-fix-1")                         │
+             │                                          ▼
+             └─► agy_result ─► review again        next plan step
+                                                     new worker B
 ```
 
 A new worker asks the user to choose an Antigravity base model and reasoning effort unless both were supplied explicitly. Effort-suffixed model variants are grouped into base-model choices where possible.
 
+Use a stable `idempotencyKey` for every logical `agy_start` and correction turn. Retrying the same key reuses the existing worker/turn instead of starting duplicate AGY work. If a caller omits a key, recent same-name + same-workspace starts are also reused as a compatibility safety net.
+
 ### Warm persistent workers
 
-When the installed AGY exposes both `--input-format stream-json` and `--output-format stream-json`, managed workers keep one warm AGY process alive between turns:
+When the installed AGY exposes both `--input-format stream-json` and `--output-format stream-json`, managed workers keep one warm AGY process alive between turns. `agy_start` waits only for the stream `init` event so the bridge can durably register `conversationId` and `state=running`; it then sends the prompt and returns immediately while AGY continues in the background.
 
 ```text
 agy_start
    ↓
 spawn AGY once
    ↓
-turn 1 over stdin
+receive init / conversationId
    ↓
-result
+persist state=running
+   ↓
+return workerId to Codex
+   ↓
+turn 1 continues over stdin
+   ↓
+result stored in MCP memory + ledger metadata
    │
    ├─ process remains warm
    │
 agy_followup
    ↓
+register background correction turn
+   ↓
 turn 2 over same stdin/process
 ```
 
-Only one turn may be active on a worker at a time. Older AGY versions automatically fall back to the v0.3 one-shot `--conversation <id>` path.
+Only one turn may be active on a worker at a time. Older AGY versions automatically fall back to the v0.3 one-shot `--conversation <id>` path; that legacy compatibility path cannot expose a conversation ID before the one-shot command finishes, so it remains blocking.
 
 ### Persistent registry and recovery
 
@@ -103,9 +116,11 @@ $CODEX_HOME/antigravity-subagent/workers
 
 or `~/.codex/antigravity-subagent/workers` when `CODEX_HOME` is not set. Override it with `AGY_MCP_STATE_DIR`.
 
-The ledger stores worker/conversation identity, friendly name, workspace, model/effort/mode, timestamps, lifecycle state, last transport/PID, turn count, and usage metadata. It **does not store prompts, responses, source code, or tool output**.
+The ledger stores worker/conversation identity, friendly name, optional idempotency key, workspace, model/effort/mode, timestamps, lifecycle/active-turn metadata, last transport/PID, turn count, timeout/cancel/error flags, and usage metadata. It **does not store prompts, responses, source code, or tool output**.
 
-After Codex/MCP restarts, an open worker is loaded as `recoverable`. The next `agy_followup` starts a new AGY process with the exact saved `--conversation <id>`. A cross-process lease prevents two MCP instances from driving the same worker concurrently; stale leases are reclaimed when their owning process is gone or the lease expires.
+The persistent-stream start path writes `conversationId`, `state=running`, and active-turn metadata before sending the long prompt. Therefore `agy_status` can identify a worker immediately even if a caller loses the `agy_start` response.
+
+After Codex/MCP restarts, an open worker is loaded as `recoverable`. A persisted `running` turn with no live owner is marked `INTERRUPTED` rather than left as a ghost running task. The next `agy_followup` starts a new AGY process with the exact saved `--conversation <id>`. A cross-process lease prevents two MCP instances from driving the same worker concurrently; stale leases are reclaimed when their owning process is gone or the lease expires.
 
 > [!NOTE]
 > v0.3 managed workers existed only in MCP memory, so workers created before upgrading to v0.4 cannot be reconstructed after a restart. Persistent recovery applies to workers created by v0.4 or later.
@@ -114,17 +129,22 @@ Warm AGY processes are released after an idle period while the logical worker re
 
 Closed worker ledger records are intentionally retained for local audit. The plugin does not currently auto-prune them. If you no longer want that history, remove the corresponding worker JSON records while no MCP server instance is using that state directory. Removing a local ledger record does not delete Antigravity's own conversation history.
 
-## Status and cancellation
+## Status, result, and cancellation
 
 ```text
 agy_status(workerId)
 agy_status(includeClosed=true)
+agy_result(workerId)
 agy_cancel(workerId)
 ```
 
-Status reports lifecycle state, warm/recoverable state, driver PID, lease information, last result, turns, and token usage. `agy_cancel` targets only the active turn; it does not delete the worker or Antigravity conversation.
+`agy_status` reports lifecycle state, warm/recoverable state, driver PID, lease information, active/last turn keys, timeout/cancel/error state, turn count, compact progress, duplicate-worker metadata, and token usage.
 
-MCP request cancellation is propagated to AGY, so a client Stop action can terminate the underlying stream or one-shot invocation rather than waiting for its timeout.
+`agy_result` never submits a prompt. While a turn is active it reports `running`; after completion it returns the final AGY response when that response is still available in the current MCP process. Final response text is intentionally memory-only. After an MCP restart, `agy_result` can still report durable completion/status/usage/error metadata, but cannot reconstruct the previous response text because the ledger never stores it.
+
+`agy_cancel` targets only the active background turn; it does not delete the worker or Antigravity conversation. For a background turn, cancellation is explicit through `agy_cancel`; the original `agy_start`/`agy_followup` MCP request has already returned by then.
+
+The bundled Codex MCP declaration sets `tool_timeout_sec` to 1200 seconds for compatibility with legacy blocking AGY paths and explicit one-shot delegation. Persistent managed starts/follow-ups normally return long before that timeout.
 
 ## Token and context handling
 
@@ -151,11 +171,13 @@ Or resume a known conversation directly:
 agy --conversation <conversation-id>
 ```
 
+Do not attach `/resume` to a conversation that the managed bridge is currently driving; Antigravity may interrupt the active session. Use `agy_status`/`agy_result` for passive inspection while work is active.
+
 This is an audit trail of persisted worker metadata plus visible Antigravity conversation/tool activity, not hidden chain-of-thought.
 
 ## One-shot delegation
 
-Use `agy_delegate` when a task does not need a review/fix loop, for example a second opinion or read-only analysis. The bundled fallback runner remains available when MCP tools are unavailable, but it does not provide the persistent registry, leases, status/cancel tools, or managed recovery runtime.
+Use `agy_delegate` when a task does not need a review/fix loop, for example a second opinion or read-only analysis. The bundled fallback runner remains available when MCP tools are unavailable, but it does not provide the persistent registry, background-turn API, idempotency/dedupe, leases, status/result/cancel tools, or managed recovery runtime.
 
 ## Permission and data flow
 
@@ -202,15 +224,35 @@ Update Antigravity CLI and rerun `agy_check(refresh=true)`. Persistent streaming
 
 ### A worker is `recoverable`
 
-This is expected after MCP/Codex restart, cancellation, warm-process loss, or idle cleanup. Send the next correction with `agy_followup(workerId)`; the plugin resumes the exact persisted conversation.
+This is expected after MCP/Codex restart, cancellation, warm-process loss, idle cleanup, or interruption of a running turn. Send the next correction with `agy_followup(workerId)`; the plugin resumes the exact persisted conversation.
 
 ### A worker is leased by another MCP process
 
 Use `agy_status(workerId)` first. Do not work around the lease by manually driving the same conversation from another managed worker. Dead/stale lease owners are reclaimed automatically.
 
+### A start/follow-up response was lost or the caller is unsure whether it launched
+
+Retry with the **same `idempotencyKey`**. The bridge reuses the existing logical worker/turn instead of creating duplicate AGY work. For starts without an explicit key, a recent same-name + same-workspace worker is reused as a compatibility fallback.
+
+### `agy_result` has no final response text after restart
+
+This is expected. Final response text is never persisted. After restart, use `agy_status` / `agy_result` for durable completion/error/usage metadata and inspect the workspace diff/tests directly. Send `agy_followup` only when a new correction is actually needed.
+
 ### The model/effort picker cannot be displayed
 
 Pass both `model` and `effort` explicitly in MCP clients that cannot display elicitation forms.
+
+### MCP fails to start when Node is managed by mise/asdf/another version manager
+
+The plugin declaration launches the server with `command: "node"`. Codex may not inherit shell initialization performed by a Node version manager. Verify what your interactive shell resolves:
+
+```powershell
+where.exe node
+node --version
+mise which node
+```
+
+If `node` is available only through shell initialization or a version-manager shim that Codex cannot resolve, make Node directly reachable from the environment used to launch Codex or configure the MCP command to a concrete Node executable path.
 
 ## Development
 
@@ -223,7 +265,7 @@ npm test
 
 `npm run verify` performs TypeScript checking, rebuilds `dist/server.cjs`, runs stream parser tests, cancellable CLI tests, persistent-driver tests, worker store/lease tests, and the protocol-only MCP smoke test without using AGY quota.
 
-`npm test` performs a real stdio MCP round trip against the authenticated AGY CLI. It validates warm-process reuse, persisted ledger metadata, status, an actual MCP restart, exact conversation recovery with a new PID, and final close/audit state.
+`npm test` performs a real stdio MCP round trip against the authenticated AGY CLI. It validates background start registration, durable running state, retry dedupe, `agy_result`, warm background follow-up, an actual MCP restart, exact conversation recovery with a new PID, and final close/audit state.
 
 Release builds are validated locally on Windows with an authenticated AGY CLI. GitHub Actions is currently unavailable for this repository/account, so it is not used as the release gate.
 

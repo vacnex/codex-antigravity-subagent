@@ -5,7 +5,7 @@ import { access, readFile, stat } from "node:fs/promises";
 import { constants } from "node:fs";
 import path from "node:path";
 
-const VERSION = "0.4.0";
+const VERSION = "0.4.1";
 const MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
 const MAX_PROMPT_CHARS = 100_000;
 

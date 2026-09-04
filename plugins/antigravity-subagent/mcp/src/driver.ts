@@ -56,6 +56,9 @@ export class AgyPersistentDriver {
   private readonly onEvent?: (event: AgyStreamEvent) => void;
   private readonly onExit?: (exitCode: number | null) => void;
   private readonly parentExitHandler: () => void;
+  private readonly initPromise: Promise<AgyStreamInitEvent | undefined>;
+  private resolveInit!: (event: AgyStreamInitEvent | undefined) => void;
+  private initSettled = false;
   private stderrTail: Buffer<ArrayBufferLike> = Buffer.alloc(0);
   private diagnosticsTruncated = false;
   private pending?: PendingTurn;
@@ -69,6 +72,9 @@ export class AgyPersistentDriver {
     this.maxDiagnosticBytes = options.maxDiagnosticBytes ?? 8 * 1024;
     this.onEvent = options.onEvent;
     this.onExit = options.onExit;
+    this.initPromise = new Promise<AgyStreamInitEvent | undefined>((resolve) => {
+      this.resolveInit = resolve;
+    });
     this.child = spawn(options.command, options.args, {
       cwd: options.cwd,
       env: process.env,
@@ -97,12 +103,14 @@ export class AgyPersistentDriver {
     this.child.on('error', (error) => {
       this.closed = true;
       this.exitCode = null;
+      this.settleInit(undefined);
       this.failPending(new Error(`Antigravity stream process error: ${error.message}`));
     });
     this.child.on('close', (exitCode) => {
       process.removeListener('exit', this.parentExitHandler);
       this.closed = true;
       this.exitCode = exitCode;
+      this.settleInit(undefined);
       if (this.pending) {
         this.failPending(new Error(
           `Antigravity stream process exited before returning a result (exit ${exitCode ?? 'unknown'}). ${this.stderrText()}`.trim(),
@@ -118,6 +126,31 @@ export class AgyPersistentDriver {
   get currentConversationId(): string | undefined { return this.conversationId; }
   get init(): AgyStreamInitEvent | undefined { return this.initEvent; }
   get lastActivityAt(): number { return this.lastActivity; }
+
+  async waitForInit(timeoutMs = 15_000, signal?: AbortSignal): Promise<AgyStreamInitEvent | undefined> {
+    if (this.initEvent) return this.initEvent;
+    if (!this.isAlive) return undefined;
+    if (signal?.aborted) return undefined;
+
+    let timeout: NodeJS.Timeout | undefined;
+    let onAbort: (() => void) | undefined;
+    const timeoutPromise = new Promise<undefined>((resolve) => {
+      timeout = setTimeout(() => resolve(undefined), timeoutMs);
+    });
+    const abortPromise = signal
+      ? new Promise<undefined>((resolve) => {
+          onAbort = () => resolve(undefined);
+          signal.addEventListener('abort', onAbort, { once: true });
+        })
+      : new Promise<undefined>(() => undefined);
+
+    try {
+      return await Promise.race([this.initPromise, timeoutPromise, abortPromise]);
+    } finally {
+      if (timeout) clearTimeout(timeout);
+      if (signal && onAbort) signal.removeEventListener('abort', onAbort);
+    }
+  }
 
   async send(prompt: string, timeoutMs: number, signal?: AbortSignal): Promise<AgyDriverTurnResult> {
     if (!this.isAlive) throw new Error('Antigravity stream driver is not running.');
@@ -188,6 +221,7 @@ export class AgyPersistentDriver {
     if (event.event === 'init') {
       this.acceptConversationId(event.conversationId);
       this.initEvent = event;
+      this.settleInit(event);
       return;
     }
     if (event.event !== 'result') return;
@@ -209,6 +243,12 @@ export class AgyPersistentDriver {
       return;
     }
     this.conversationId = next;
+  }
+
+  private settleInit(event: AgyStreamInitEvent | undefined): void {
+    if (this.initSettled) return;
+    this.initSettled = true;
+    this.resolveInit(event);
   }
 
   private stderrText(): string { return this.stderrTail.toString('utf8').trim(); }
