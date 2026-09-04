@@ -22,6 +22,13 @@ type ModelOption = {
   label: string;
 };
 
+type ModelFamilyOption = {
+  value: string;
+  label: string;
+  directSlug?: string;
+  variants: Partial<Record<Effort, string>>;
+};
+
 type AgyUsage = {
   input_tokens?: number;
   output_tokens?: number;
@@ -249,21 +256,56 @@ function inferPinnedEffort(model: string): Effort | undefined {
   return match[1].toLowerCase() as Effort;
 }
 
-function reconcileModelAndEffort(
-  models: ModelOption[],
-  model: string,
+function stripPinnedEffortLabel(label: string): string {
+  const stripped = label.replace(/\s*\((?:low|medium|high)\)\s*$/i, '').trim();
+  return stripped || label;
+}
+
+function groupModelOptions(models: ModelOption[]): ModelFamilyOption[] {
+  const families = new Map<string, ModelFamilyOption>();
+
+  for (const option of models) {
+    const pinnedEffort = inferPinnedEffort(option.slug);
+    const value = pinnedEffort
+      ? option.slug.slice(0, -(pinnedEffort.length + 1))
+      : option.slug;
+    const key = value.toLowerCase();
+    let family = families.get(key);
+    if (!family) {
+      family = {
+        value,
+        label: pinnedEffort ? stripPinnedEffortLabel(option.label) : option.label,
+        variants: {},
+      };
+      families.set(key, family);
+    }
+
+    if (pinnedEffort) {
+      family.variants[pinnedEffort] = option.slug;
+    } else {
+      family.directSlug = option.slug;
+      family.label = option.label;
+    }
+  }
+
+  return [...families.values()];
+}
+
+function resolveModelFamilySelection(
+  families: ModelFamilyOption[],
+  selectedModel: string,
   effort: Effort,
 ): { model: string; effort: Effort } | { error: string } {
-  const pinnedEffort = inferPinnedEffort(model);
-  if (!pinnedEffort || pinnedEffort === effort) return { model, effort };
+  const family = families.find((option) => option.value.toLowerCase() === selectedModel.toLowerCase());
+  if (!family) return { error: `Unknown Antigravity model selection: ${selectedModel}.` };
 
-  const family = model.slice(0, -(pinnedEffort.length + 1));
-  const desiredSlug = `${family}-${effort}`;
-  const sibling = models.find((option) => option.slug.toLowerCase() === desiredSlug.toLowerCase());
-  if (sibling) return { model: sibling.slug, effort };
+  const variant = family.variants[effort];
+  if (variant) return { model: variant, effort };
+  if (family.directSlug) return { model: family.directSlug, effort };
 
+  const available = (Object.keys(family.variants) as Effort[]).join(', ');
   return {
-    error: `Antigravity model ${model} pins effort ${pinnedEffort}, and no ${effort} variant is available for the same model family.`,
+    error: `${family.label} does not expose ${effort} effort in the current Antigravity model catalog. Available efforts: ${available || 'none'}.`,
   };
 }
 
@@ -289,10 +331,10 @@ async function chooseModelAndEffort(
     return { model: requestedModel, effort: requestedEffort };
   }
 
-  let models: ModelOption[] = [];
+  let families: ModelFamilyOption[] = [];
   if (!requestedModel) {
     try {
-      models = await listAgyModels(executable, cwd);
+      families = groupModelOptions(await listAgyModels(executable, cwd));
     } catch (error) {
       return { error: error instanceof Error ? error.message : String(error) };
     }
@@ -304,9 +346,9 @@ async function chooseModelAndEffort(
     properties.model = {
       type: 'string',
       title: 'Model',
-      description: 'Antigravity model for this worker',
-      enum: models.map((option) => option.slug),
-      enumNames: models.map((option) => option.label),
+      description: 'Antigravity base model for this worker',
+      enum: families.map((option) => option.value),
+      enumNames: families.map((option) => option.label),
     };
     required.push('model');
   }
@@ -342,7 +384,7 @@ async function chooseModelAndEffort(
     if (typeof model !== 'string' || !model) return { error: 'No Antigravity model was selected.' };
     if (effort !== 'low' && effort !== 'medium' && effort !== 'high') return { error: 'No valid Antigravity effort was selected.' };
 
-    if (!requestedModel) return reconcileModelAndEffort(models, model, effort);
+    if (!requestedModel) return resolveModelFamilySelection(families, model, effort);
 
     const pinnedEffort = inferPinnedEffort(model);
     if (pinnedEffort && pinnedEffort !== effort) {
