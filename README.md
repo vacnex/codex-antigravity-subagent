@@ -1,6 +1,5 @@
 # Antigravity Subagent for Codex
 
-[![CI](https://github.com/vacnex/codex-antigravity-subagent/actions/workflows/ci.yml/badge.svg)](https://github.com/vacnex/codex-antigravity-subagent/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/vacnex/codex-antigravity-subagent)](https://github.com/vacnex/codex-antigravity-subagent/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
@@ -40,6 +39,8 @@ codex plugin marketplace add vacnex/codex-antigravity-subagent --ref main
 ```
 
 Then open Codex, run `/plugins`, choose **Antigravity Subagent**, and install it. Start a new Codex session afterward so the skill and MCP tools are loaded.
+
+Because this plugin declares a local MCP server, ChatGPT marketplace imports may be labeled **Desktop only**; the local MCP runtime is not intended for ChatGPT web.
 
 ## Managed worker workflow
 
@@ -106,7 +107,12 @@ The ledger stores worker/conversation identity, friendly name, workspace, model/
 
 After Codex/MCP restarts, an open worker is loaded as `recoverable`. The next `agy_followup` starts a new AGY process with the exact saved `--conversation <id>`. A cross-process lease prevents two MCP instances from driving the same worker concurrently; stale leases are reclaimed when their owning process is gone or the lease expires.
 
+> [!NOTE]
+> v0.3 managed workers existed only in MCP memory, so workers created before upgrading to v0.4 cannot be reconstructed after a restart. Persistent recovery applies to workers created by v0.4 or later.
+
 Warm AGY processes are released after an idle period while the logical worker remains recoverable. Set `AGY_MCP_IDLE_DRIVER_MS` to tune the idle duration (minimum 10 seconds; default 10 minutes).
+
+Closed worker ledger records are intentionally retained for local audit. The plugin does not currently auto-prune them. If you no longer want that history, remove the corresponding worker JSON records while no MCP server instance is using that state directory. Removing a local ledger record does not delete Antigravity's own conversation history.
 
 ## Status and cancellation
 
@@ -218,6 +224,8 @@ npm test
 `npm run verify` performs TypeScript checking, rebuilds `dist/server.cjs`, runs stream parser tests, cancellable CLI tests, persistent-driver tests, worker store/lease tests, and the protocol-only MCP smoke test without using AGY quota.
 
 `npm test` performs a real stdio MCP round trip against the authenticated AGY CLI. It validates warm-process reuse, persisted ledger metadata, status, an actual MCP restart, exact conversation recovery with a new PID, and final close/audit state.
+
+Release builds are validated locally on Windows with an authenticated AGY CLI. GitHub Actions is currently unavailable for this repository/account, so it is not used as the release gate.
 
 The checked-in `dist/server.cjs` is the runtime artifact used by the installed plugin and must be regenerated after source changes.
 
