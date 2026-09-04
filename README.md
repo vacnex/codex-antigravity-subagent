@@ -23,7 +23,7 @@ Managed responses are capped at 64 KiB. Stream step updates are summarized rathe
 
 ## Requirements
 
-- Codex CLI or Codex in the ChatGPT desktop app
+- Codex CLI or a supported Codex desktop surface that can run local MCP servers
 - Node.js 20 or newer
 - [Google Antigravity CLI](https://antigravity.google/docs/cli-getting-started), installed and authenticated as `agy`
 
@@ -40,7 +40,7 @@ codex plugin marketplace add vacnex/codex-antigravity-subagent --ref main
 
 Then open Codex, run `/plugins`, choose **Antigravity Subagent**, and install it. Start a new Codex session afterward so the skill and MCP tools are loaded.
 
-Because this plugin declares a local MCP server, ChatGPT marketplace imports may be labeled **Desktop only**; the local MCP runtime is not intended for ChatGPT web.
+Because this plugin declares a local MCP server, imported ChatGPT plugins can be labeled **Desktop only**; this local MCP runtime is not intended for ChatGPT web.
 
 ## Managed worker workflow
 
