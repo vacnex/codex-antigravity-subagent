@@ -200,7 +200,7 @@ async function chooseModelAndEffort(
     }
   }
 
-  const properties: Record<string, unknown> = {};
+  const properties: Record<string, any> = {};
   const required: string[] = [];
   if (!requestedModel) {
     properties.model = {
@@ -287,12 +287,13 @@ function managedResult(
     ? `Antigravity timed out after ${timeoutSeconds} seconds.`
     : response || error || fallbackError || '(Antigravity returned no output)';
   const isError = result.timedOut || result.exitCode !== 0 || (envelope !== undefined && envelope.status !== 'SUCCESS');
+  const conversationId = worker?.conversationId ?? envelope?.conversation_id ?? undefined;
 
   return {
     content: [{ type: 'text' as const, text }],
     structuredContent: {
       workerId: worker?.workerId,
-      conversationId: worker?.conversationId ?? envelope?.conversation_id || undefined,
+      conversationId,
       status: envelope?.status ?? (isError ? 'ERROR' : 'SUCCESS'),
       model: worker?.model,
       effort: worker?.effort,
