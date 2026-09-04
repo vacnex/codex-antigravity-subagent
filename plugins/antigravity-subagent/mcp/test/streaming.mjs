@@ -86,6 +86,10 @@ try {
     { streamOutput: true, streamInput: true, persistentDriver: true },
   );
   assert.deepEqual(
+    detectAgyStreamingCapabilities('Options: --input-format <format> --output-format <format>'),
+    { streamOutput: true, streamInput: true, persistentDriver: true },
+  );
+  assert.deepEqual(
     detectAgyStreamingCapabilities('Options: --output-format <text|json>'),
     { streamOutput: false, streamInput: false, persistentDriver: false },
   );
