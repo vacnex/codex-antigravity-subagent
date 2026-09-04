@@ -61,6 +61,10 @@ export class WorkerLedger {
     this.store = store;
   }
 
+  get stateDir(): string {
+    return this.store.rootDir;
+  }
+
   async recordTurn(worker: WorkerLedgerWorker, turn: WorkerLedgerTurn): Promise<string | undefined> {
     const updatedAt = new Date().toISOString();
     const record: WorkerLedgerRecord = {
