@@ -70,6 +70,8 @@ try {
   assert.deepEqual(await store.read(initial.workerId), initial);
   assert.deepEqual(await store.list(), [initial]);
 
+  // Writing the same worker again exercises replace-existing rename semantics,
+  // including the Windows path used by the release gate.
   const updated = {
     ...initial,
     conversationId: 'conversation-1',
