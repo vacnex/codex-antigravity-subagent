@@ -14,6 +14,14 @@ const client = new Client(
   { capabilities: { elicitation: { form: {} } } },
 );
 
+function assertToolSucceeded(name, result) {
+  assert.notEqual(
+    result.isError,
+    true,
+    `${name} failed:\n${JSON.stringify(result, null, 2)}`,
+  );
+}
+
 client.setRequestHandler('elicitation/create', async (request) => {
   if (request.params.mode !== 'form') return { action: 'decline' };
   const schema = request.params.requestedSchema;
@@ -44,7 +52,7 @@ try {
 
   if (!protocolOnly) {
     const check = await client.callTool({ name: 'agy_check', arguments: {} });
-    assert.notEqual(check.isError, true);
+    assertToolSucceeded('agy_check', check);
     assert.match(check.content[0].text, /Antigravity CLI is available at:/);
 
     const started = await client.callTool({
@@ -56,7 +64,7 @@ try {
         timeoutSeconds: 120,
       },
     });
-    assert.notEqual(started.isError, true);
+    assertToolSucceeded('agy_start', started);
     assert.match(started.content[0].text, /AGY_WORKER_STARTED/);
     assert.equal(typeof started.structuredContent?.workerId, 'string');
     assert.equal(typeof started.structuredContent?.conversationId, 'string');
@@ -73,13 +81,13 @@ try {
         timeoutSeconds: 120,
       },
     });
-    assert.notEqual(followedUp.isError, true);
+    assertToolSucceeded('agy_followup', followedUp);
     assert.match(followedUp.content[0].text, /AGY_WORKER_RESUMED/);
     assert.equal(followedUp.structuredContent?.workerId, workerId);
     assert.equal(followedUp.structuredContent?.conversationId, conversationId);
 
     const closed = await client.callTool({ name: 'agy_close', arguments: { workerId } });
-    assert.notEqual(closed.isError, true);
+    assertToolSucceeded('agy_close', closed);
     assert.equal(closed.structuredContent?.closed, true);
     assert.equal(closed.structuredContent?.conversationId, conversationId);
   }
