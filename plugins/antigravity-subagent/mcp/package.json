@@ -10,7 +10,8 @@
     "build": "esbuild src/index.ts --bundle --minify --platform=node --format=cjs --target=node20 --outfile=dist/server.cjs",
     "check": "tsc --noEmit",
     "test": "node test/smoke.mjs",
-    "test:protocol": "node test/smoke.mjs --protocol-only"
+    "test:streaming": "node test/streaming.mjs",
+    "test:protocol": "node test/streaming.mjs && node test/smoke.mjs --protocol-only"
   },
   "dependencies": {
     "@modelcontextprotocol/server": "2.0.0",
