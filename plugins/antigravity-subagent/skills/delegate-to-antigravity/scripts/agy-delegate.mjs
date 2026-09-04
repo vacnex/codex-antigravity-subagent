@@ -103,7 +103,7 @@ function run(executable, args, cwd, timeoutMs) {
 
 const options = parseArgs(process.argv.slice(2));
 if (options.help) {
-  process.stdout.write("Usage: agy-delegate.mjs --check | --cwd PATH --prompt-file PATH [--mode plan|default|accept-edits] [--output-format text|json] [--timeout-seconds N] [--agent NAME] [--model NAME]\n");
+  process.stdout.write("Usage: agy-delegate.mjs --check | --cwd PATH --prompt-file PATH [--mode plan|default|accept-edits] [--output-format text|json] [--timeout-seconds N] [--agent NAME] [--model NAME] [--effort low|medium|high] [--conversation ID]\n");
   process.exit(0);
 }
 
@@ -142,10 +142,16 @@ const timeoutSeconds = Number(options["timeout-seconds"] ?? 900);
 if (!Number.isInteger(timeoutSeconds) || timeoutSeconds < 1 || timeoutSeconds > 1800) {
   fail("--timeout-seconds must be an integer from 1 to 1800");
 }
+const effort = options.effort;
+if (effort !== undefined && !["low", "medium", "high"].includes(effort)) {
+  fail("--effort must be one of: low, medium, high");
+}
 
 const agyArgs = ["--print", prompt, "--output-format", outputFormat, "--mode", mode];
 if (options.agent) agyArgs.push("--agent", options.agent);
 if (options.model) agyArgs.push("--model", options.model);
+if (effort) agyArgs.push("--effort", effort);
+if (options.conversation) agyArgs.push("--conversation", options.conversation);
 
 const result = await run(executable, agyArgs, workspace, timeoutSeconds * 1000);
 if (result.stdout) process.stdout.write(result.stdout);
