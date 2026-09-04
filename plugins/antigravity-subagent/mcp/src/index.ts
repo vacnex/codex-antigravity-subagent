@@ -13,6 +13,7 @@ const MAX_STDOUT_BYTES = 2 * 1024 * 1024;
 const MAX_STDERR_BYTES = 8 * 1024;
 const MAX_RESPONSE_BYTES = 64 * 1024;
 const MODEL_LIST_TIMEOUT_MS = 15_000;
+const CAPABILITY_TIMEOUT_MS = 10_000;
 
 type Effort = 'low' | 'medium' | 'high';
 type RunMode = 'plan' | 'default' | 'accept-edits';
@@ -27,6 +28,15 @@ type ModelFamilyOption = {
   label: string;
   directSlug?: string;
   variants: Partial<Record<Effort, string>>;
+};
+
+type AgyCapabilities = {
+  jsonOutput: boolean;
+  modelSelection: boolean;
+  effort: boolean;
+  conversationResume: boolean;
+  mode: boolean;
+  modelCatalog: boolean;
 };
 
 type AgyUsage = {
@@ -291,6 +301,62 @@ function groupModelOptions(models: ModelOption[]): ModelFamilyOption[] {
   return [...families.values()];
 }
 
+function firstNonEmptyLine(...values: string[]): string | undefined {
+  for (const value of values) {
+    const line = value.split(/\r?\n/).map((entry) => entry.trim()).find(Boolean);
+    if (line) return line;
+  }
+  return undefined;
+}
+
+async function probeAgyCapabilities(executable: string): Promise<{
+  version?: string;
+  capabilities: AgyCapabilities;
+  modelCount?: number;
+  baseModelCount?: number;
+  warnings: string[];
+}> {
+  const cwd = process.cwd();
+  const warnings: string[] = [];
+
+  const versionResult = await runAgy(executable, ['--version'], cwd, CAPABILITY_TIMEOUT_MS);
+  const version = versionResult.exitCode === 0
+    ? firstNonEmptyLine(versionResult.stdout, versionResult.stderr)
+    : undefined;
+  if (!version) warnings.push('Could not read `agy --version`.');
+
+  const helpResult = await runAgy(executable, ['--help'], cwd, CAPABILITY_TIMEOUT_MS);
+  const helpText = `${helpResult.stdout}\n${helpResult.stderr}`;
+  if (helpResult.timedOut || helpResult.exitCode !== 0) warnings.push('Could not fully inspect `agy --help`.');
+
+  let modelCount: number | undefined;
+  let baseModelCount: number | undefined;
+  let modelCatalog = false;
+  try {
+    const models = await listAgyModels(executable, cwd);
+    modelCount = models.length;
+    baseModelCount = groupModelOptions(models).length;
+    modelCatalog = models.length > 0;
+  } catch (error) {
+    warnings.push(error instanceof Error ? error.message : String(error));
+  }
+
+  return {
+    version,
+    capabilities: {
+      jsonOutput: helpText.includes('--output-format'),
+      modelSelection: helpText.includes('--model'),
+      effort: helpText.includes('--effort'),
+      conversationResume: helpText.includes('--conversation'),
+      mode: helpText.includes('--mode'),
+      modelCatalog,
+    },
+    modelCount,
+    baseModelCount,
+    warnings,
+  };
+}
+
 function resolveModelFamilySelection(
   families: ModelFamilyOption[],
   selectedModel: string,
@@ -473,7 +539,7 @@ function createServer(): McpServer {
     'agy_check',
     {
       title: 'Check Antigravity CLI',
-      description: 'Verify that Google Antigravity CLI is installed and return its executable path.',
+      description: 'Verify the Google Antigravity CLI installation and report the capabilities required by this plugin.',
       inputSchema: z.object({}),
       annotations: {
         readOnlyHint: true,
@@ -490,9 +556,34 @@ function createServer(): McpServer {
           isError: true,
         };
       }
+
+      const report = await probeAgyCapabilities(executable);
+      const capabilityEntries = Object.entries(report.capabilities);
+      const missing = capabilityEntries.filter(([, supported]) => !supported).map(([name]) => name);
+      const lines = [
+        `Antigravity CLI is available at: ${executable}`,
+        report.version ? `Version: ${report.version}` : 'Version: unknown',
+        `Capabilities: ${capabilityEntries.map(([name, supported]) => `${name}=${supported ? 'yes' : 'no'}`).join(', ')}`,
+      ];
+      if (report.modelCount !== undefined) {
+        lines.push(`Models: ${report.modelCount} variants across ${report.baseModelCount ?? report.modelCount} base models`);
+      }
+      if (report.warnings.length > 0) lines.push(`Warnings: ${report.warnings.join(' | ')}`);
+      if (missing.length > 0) lines.push(`Missing capabilities: ${missing.join(', ')}`);
+
       return {
-        content: [{ type: 'text', text: `Antigravity CLI is available at: ${executable}` }],
-        structuredContent: { available: true, executable },
+        content: [{ type: 'text', text: lines.join('\n') }],
+        structuredContent: {
+          available: true,
+          executable,
+          version: report.version,
+          capabilities: report.capabilities,
+          modelCount: report.modelCount,
+          baseModelCount: report.baseModelCount,
+          warnings: report.warnings,
+          compatible: missing.length === 0,
+        },
+        isError: missing.length > 0,
       };
     },
   );
