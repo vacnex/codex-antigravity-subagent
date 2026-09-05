@@ -29,7 +29,7 @@ import {
 import { normalizeManagedResult } from './result-semantics.js';
 import { WorkerRuntime, type RuntimeToolResult } from './runtime.js';
 
-const VERSION = '0.4.2';
+const VERSION = '0.4.3';
 const WAIT_POLL_MS = 1_000;
 const NEW_PROJECT_DISCOVERY_MS = 3_000;
 const NEW_PROJECT_DISCOVERY_POLL_MS = 100;
