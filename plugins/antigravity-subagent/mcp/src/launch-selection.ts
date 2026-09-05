@@ -51,6 +51,16 @@ type ModelFamily = {
   variants: Partial<Record<Effort, string>>;
 };
 
+type ElicitParams = Parameters<typeof inputRequired.elicit>[0];
+type ElicitStringProperty = {
+  type: 'string';
+  title?: string;
+  description?: string;
+  enum?: string[];
+  enumNames?: string[];
+  default?: string;
+};
+
 function resolveFamilyModel(
   families: ModelFamily[],
   selected: string,
@@ -138,7 +148,7 @@ export async function resolveLaunchSelection(
   const accepted = acceptedLaunchContent(ctx);
 
   if ((needsProject || needsModel || needsEffort) && !accepted) {
-    const properties: Record<string, unknown> = {};
+    const properties: Record<string, ElicitStringProperty> = {};
     const required: string[] = [];
 
     if (needsProject) {
@@ -174,11 +184,12 @@ export async function resolveLaunchSelection(
       required.push('effort');
     }
 
+    const requestedSchema = { type: 'object' as const, properties, required } as ElicitParams['requestedSchema'];
     return inputRequired({
       inputRequests: {
         launch: inputRequired.elicit({
           message: 'Choose the unresolved Antigravity worker settings.',
-          requestedSchema: { type: 'object', properties, required },
+          requestedSchema,
         }),
       },
     });
