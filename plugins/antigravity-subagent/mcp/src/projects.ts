@@ -52,9 +52,12 @@ export function folderUriToPath(value: string, platform: NodeJS.Platform = proce
 }
 
 export function canonicalProjectPath(value: string, platform: NodeJS.Platform = process.platform): string {
-  const normalized = platform === 'win32'
-    ? path.win32.resolve(value).replace(/[\\/]+$/, '') || path.win32.parse(path.win32.resolve(value)).root
-    : path.resolve(value).replace(/\/+$/, '') || path.parse(path.resolve(value)).root;
+  const resolved = platform === 'win32' ? path.win32.resolve(value) : path.resolve(value);
+  const parsedRoot = platform === 'win32' ? path.win32.parse(resolved).root : path.parse(resolved).root;
+  const withoutTrailing = platform === 'win32'
+    ? resolved.replace(/[\\/]+$/, '')
+    : resolved.replace(/\/+$/, '');
+  const normalized = withoutTrailing || parsedRoot;
   return platform === 'win32' ? normalized.toLowerCase() : normalized;
 }
 
@@ -69,17 +72,18 @@ export function projectContainsPath(
   const relative = platform === 'win32'
     ? path.win32.relative(canonicalRoot, canonicalCwd)
     : path.relative(canonicalRoot, canonicalCwd);
+  const separator = platform === 'win32' ? '\\' : path.sep;
   return Boolean(relative)
     && relative !== '..'
-    && !relative.startsWith(`..${platform === 'win32' ? '\\' : path.sep}`)
+    && !relative.startsWith(`..${separator}`)
     && !(platform === 'win32' ? path.win32.isAbsolute(relative) : path.isAbsolute(relative));
 }
 
 function rootSpecificity(root: string, platform: NodeJS.Platform = process.platform): number {
   const canonical = canonicalProjectPath(root, platform);
-  const separator = platform === 'win32' ? /[\\/]+/ : /\/+ /;
-  if (platform === 'win32') return canonical.split(/[\\/]+/).filter(Boolean).length;
-  return canonical.split('/').filter(Boolean).length;
+  return platform === 'win32'
+    ? canonical.split(/[\\/]+/).filter(Boolean).length
+    : canonical.split('/').filter(Boolean).length;
 }
 
 function collectFolderUris(value: unknown, result: string[]): void {
@@ -200,6 +204,5 @@ export function resolveAgyProject(
 }
 
 export function describeProjectChoice(project: AgyProject): string {
-  const roots = project.roots.join(', ');
-  return `${project.name} — ${roots}`;
+  return `${project.name} — ${project.roots.join(', ')}`;
 }
