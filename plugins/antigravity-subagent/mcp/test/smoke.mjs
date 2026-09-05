@@ -56,10 +56,15 @@ async function openClient(label) {
   const transport = new StdioClientTransport({ command: process.execPath, args: [serverPath], env: childEnv });
   const client = new Client(
     { name: `agy-mcp-smoke-${label}`, version: '1.0.0' },
-    { capabilities: { elicitation: { form: {} } }, inputRequired: { autoFulfill: true, maxRounds: 4 } },
+    {
+      capabilities: { elicitation: { form: {} } },
+      versionNegotiation: { mode: 'auto' },
+      inputRequired: { autoFulfill: true, maxRounds: 4 },
+    },
   );
   configureElicitation(client);
   await client.connect(transport);
+  assert.equal(client.getProtocolEra(), 'modern', 'v2 smoke test must exercise native input_required rather than the legacy push shim');
   return { client, transport };
 }
 
