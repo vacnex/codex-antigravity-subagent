@@ -8,6 +8,7 @@ import type { AgyUsage } from './streaming.js';
 export type WorkerLedgerTransport = 'stream' | 'oneshot';
 export type WorkerLifecycleState = 'ready' | 'running' | 'recoverable' | 'closed' | 'error';
 export type WorkerTurnKind = 'start' | 'followup';
+export type WorkerProjectResolution = 'explicit' | 'auto' | 'selected' | 'created';
 
 export type WorkerLedgerRecord = {
   schemaVersion: 1;
@@ -20,6 +21,12 @@ export type WorkerLedgerRecord = {
   agent?: string;
   model: string;
   effort: string;
+  agyProjectId?: string;
+  agyProjectName?: string;
+  agyProjectRoots?: string[];
+  agyProjectResolution?: WorkerProjectResolution;
+  agyProjectRegistryDir?: string;
+  agyWorkspaceAttested?: boolean;
   createdAt: string;
   updatedAt: string;
   lastActivityAt?: string;
@@ -66,6 +73,10 @@ function optionalString(value: unknown): value is string | undefined {
   return value === undefined || typeof value === 'string';
 }
 
+function optionalStringArray(value: unknown): value is string[] | undefined {
+  return value === undefined || (Array.isArray(value) && value.every((entry) => typeof entry === 'string'));
+}
+
 function optionalNumber(value: unknown): value is number | undefined {
   return value === undefined || (typeof value === 'number' && Number.isFinite(value));
 }
@@ -94,6 +105,10 @@ function isTurnKind(value: unknown): value is WorkerTurnKind | undefined {
   return value === undefined || value === 'start' || value === 'followup';
 }
 
+function isProjectResolution(value: unknown): value is WorkerProjectResolution | undefined {
+  return value === undefined || value === 'explicit' || value === 'auto' || value === 'selected' || value === 'created';
+}
+
 export function isWorkerLedgerRecord(value: unknown): value is WorkerLedgerRecord {
   if (!isRecord(value) || value.schemaVersion !== 1) return false;
   if (typeof value.workerId !== 'string' || !value.workerId) return false;
@@ -104,6 +119,10 @@ export function isWorkerLedgerRecord(value: unknown): value is WorkerLedgerRecor
   if (!optionalString(value.agent)) return false;
   if (typeof value.model !== 'string' || !value.model) return false;
   if (typeof value.effort !== 'string' || !value.effort) return false;
+  if (!optionalString(value.agyProjectId) || !optionalString(value.agyProjectName)) return false;
+  if (!optionalStringArray(value.agyProjectRoots)) return false;
+  if (!isProjectResolution(value.agyProjectResolution)) return false;
+  if (!optionalString(value.agyProjectRegistryDir) || !optionalBoolean(value.agyWorkspaceAttested)) return false;
   if (typeof value.createdAt !== 'string' || !value.createdAt) return false;
   if (typeof value.updatedAt !== 'string' || !value.updatedAt) return false;
   if (!optionalString(value.lastActivityAt) || !optionalString(value.closedAt)) return false;
