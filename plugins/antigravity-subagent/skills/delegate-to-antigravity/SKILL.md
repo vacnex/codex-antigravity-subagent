@@ -13,19 +13,20 @@ Prefer managed workers for implementation or any task likely to need review corr
 
 1. Establish availability with `agy_check` and require a compatible Antigravity CLI capability report before managed work.
 2. Before each new plan step, choose a stable `idempotencyKey` for that logical step and reuse the exact same key if the `agy_start` request/result is retried or uncertain. Do not generate a different retry key merely because a previous tool response was lost.
-3. For the first plan step in a blueprint, call `agy_start` with the real absolute checkout `cwd`. If `projectId`, `model`, or `effort` is unresolved, let the MCP setup flow obtain only the missing values. Do not silently invent a Project, model, or effort selection.
-4. The MCP project resolver maps `cwd` to Antigravity Projects. Zero matches creates a new AGY Project for the workspace; one most-specific match is selected automatically; equally specific overlapping Projects require user selection. Never work around an ambiguous Project by guessing.
-5. Preserve the returned `agyProjectId`. For every later **new worker** in the same blueprint/workspace, pass that exact `projectId` to `agy_start`. This pins all plan steps to the same multi-root Antigravity Project. If a newly created Project has not exposed its ID yet, let the next start resolve the now-existing Project rather than inventing an ID.
-6. Do not pass or re-select a Project on `agy_followup`. Resuming the existing `conversationId` inherits the conversation's Antigravity Project.
-7. On a persistent-stream capable AGY, `agy_start` returns after the stream handshake, workspace attestation, and durable worker registration while the first turn continues in the background. Treat `state=running` / `done=false` as an accepted launch, not as a completed task. Keep the returned `workerId` and `conversationId`.
-8. Call `agy_wait(workerId)` as the normal completion barrier. It sends no prompt and does not own or cancel the worker. If it returns `done=false` because the passive wait interval elapsed, call `agy_wait` again rather than ending the task or starting another worker.
-9. When `agy_wait` or `agy_result` reports `done=true`, inspect the shared workspace diff and run the required validation independently. The delegated response is advisory; the workspace and Codex review are the implementation source of truth.
-10. A terminal AGY `agyStatus=ERROR` is **not automatically an implementation failure**. Inspect `transportStatus`, `failureKind`, the workspace diff, and validation results first. In particular, `failureKind=agy_response_timeout` means AGY returned a terminal response-timeout condition; it does not prove the code is wrong.
-11. If the independent review PASSes despite an AGY terminal error, do **not** submit a no-op correction merely to make the AGY report say SUCCESS. Close the worker and proceed. If the independent review FAILs, choose a stable correction `idempotencyKey`, call `agy_followup` with the same worker, wait, and review again.
-12. Use `agy_status` when worker state is uncertain, especially after a Codex/MCP restart. A persisted open worker may be `recoverable`; `agy_followup` resumes its exact `conversationId`.
-13. Use `agy_cancel(workerId)` only when the active turn is no longer useful. Canceling an `agy_wait` call must never be treated as permission to cancel the AGY worker.
-14. Call `agy_close` only after Codex review PASSes. Closing retains local metadata and Antigravity conversation history.
-15. For a distinct plan step, start a fresh worker with a new logical idempotency key. Do not reuse the previous plan step's conversation as implementation context.
+3. Before delegation, Codex resolves the applicable project/user instructions for the current checkout, including relevant `AGENTS.md` or equivalent project guidance, and distills only the task-relevant constraints into the delegated prompt. Do not make AGY rediscover the full instruction hierarchy by default.
+4. For the first plan step in a blueprint, call `agy_start` with the real absolute checkout `cwd`. If `projectId`, `model`, or `effort` is unresolved, let the MCP setup flow obtain only the missing values. Do not silently invent a Project, model, or effort selection.
+5. The MCP project resolver maps `cwd` to Antigravity Projects. Zero matches creates a new AGY Project for the workspace; one most-specific match is selected automatically; equally specific overlapping Projects require user selection. Never work around an ambiguous Project by guessing.
+6. Preserve the returned `agyProjectId`. For every later **new worker** in the same blueprint/workspace, pass that exact `projectId` to `agy_start`. This pins all plan steps to the same multi-root Antigravity Project. If a newly created Project has not exposed its ID yet, let the next start resolve the now-existing Project rather than inventing an ID.
+7. Do not pass or re-select a Project on `agy_followup`. Resuming the existing `conversationId` inherits the conversation's Antigravity Project.
+8. On a persistent-stream capable AGY, `agy_start` returns after the stream handshake, workspace attestation, and durable worker registration while the first turn continues in the background. Treat `state=running` / `done=false` as an accepted launch, not as a completed task. Keep the returned `workerId` and `conversationId`.
+9. Call `agy_wait(workerId)` as the normal completion barrier. It sends no prompt and does not own or cancel the worker. If it returns `done=false` because the passive wait interval elapsed, call `agy_wait` again rather than ending the task or starting another worker.
+10. When `agy_wait` or `agy_result` reports `done=true`, inspect the shared workspace diff and run the required validation independently. The delegated response is advisory; the workspace and Codex review are the implementation source of truth.
+11. A terminal AGY `agyStatus=ERROR` is **not automatically an implementation failure**. Inspect `transportStatus`, `failureKind`, the workspace diff, and validation results first. In particular, `failureKind=agy_response_timeout` means AGY returned a terminal response-timeout condition; it does not prove the code is wrong.
+12. If the independent review PASSes despite an AGY terminal error, do **not** submit a no-op correction merely to make the AGY report say SUCCESS. Close the worker and proceed. If the independent review FAILs, choose a stable correction `idempotencyKey`, call `agy_followup` with the same worker, wait, and review again.
+13. Use `agy_status` when worker state is uncertain, especially after a Codex/MCP restart. A persisted open worker may be `recoverable`; `agy_followup` resumes its exact `conversationId`.
+14. Use `agy_cancel(workerId)` only when the active turn is no longer useful. Canceling an `agy_wait` call must never be treated as permission to cancel the AGY worker.
+15. Call `agy_close` only after Codex review PASSes. Closing retains local metadata and Antigravity conversation history.
+16. For a distinct plan step, start a fresh worker with a new logical idempotency key. Do not reuse the previous plan step's conversation as implementation context.
 
 For sequential multi-step plans, use one Antigravity worker per plan step. Finish the wait/result/review/fix/close loop for the current step before starting the next unless the user explicitly requests parallel work.
 
@@ -47,6 +48,16 @@ A persistent AGY worker must attest its stream `init.cwd` before the prompt is s
 
 Project roots are **read/search scope**, not write permission. The delegated prompt's Owned Paths remain the write scope.
 
+## Rule ownership and bounded research
+
+Codex is the repository-level orchestrator. AGY is the bounded executor for one already-scoped task.
+
+Before starting a worker, Codex should read and resolve the instruction sources that govern the target checkout or module, then pass the relevant constraints explicitly as `PROJECT CONSTRAINTS`. This includes applicable repository/module `AGENTS.md` files, user/project build rules, and task-specific conventions. Do not copy unrelated global guidance into every worker prompt.
+
+AGY still needs enough local context to implement correctly. It should read the Owned Paths and supplied Read-only Context, and it may inspect additional adjacent files when needed to resolve a **concrete implementation uncertainty**. It should not broadly rediscover requirements, coding conventions, build strategy, repository location, or architecture that Codex has already resolved and supplied.
+
+A good first pass is preferable to “code blindly and let Codex fix it.” Codex review is the independent safety net, not a substitute for AGY reading the directly relevant code.
+
 ## Delegated execution contract
 
 Every implementation prompt sent to a plan worker should make the execution boundaries explicit. Include the following information when it is available:
@@ -58,29 +69,63 @@ EXPECTED WORKSPACE
 ANTIGRAVITY PROJECT
 <project id/name and roots when known>
 
+ROLE
+You are the bounded implementation worker for this single task.
+Codex has already performed repository-level planning and will independently
+review the resulting workspace diff afterward.
+
 OWNED PATHS
 <paths this plan may modify>
 
 READ-ONLY CONTEXT
-<direct dependencies or supporting paths that may be inspected>
+<direct dependencies or supporting paths that should be inspected>
 
-FORBIDDEN PATHS
-<paths that must not be modified>
+PROJECT CONSTRAINTS
+<only task-relevant rules already resolved by Codex from project/user instructions>
+
+TASK
+<the exact bounded implementation task and acceptance criteria>
 
 CANONICAL VALIDATION
-<the single project-appropriate validation/build/test command, if required>
+<the single project-appropriate validation/build/test command resolved by Codex, if required>
 
-STOP CONDITIONS
+EXECUTION RULES
+- Read Owned Paths and supplied Read-only Context before editing.
+- Inspect additional adjacent files only when needed to resolve a concrete implementation uncertainty.
+- Do not broadly rediscover requirements or conventions already supplied in this task.
 - Do not search parent trees or drives to locate the repository.
 - Do not modify outside Owned Paths.
-- Read outside Owned Paths only when needed for a direct dependency or acceptance check.
-- Do not investigate or repair unrelated build failures outside this plan's scope.
-- Do not invent alternate restore/build strategies unless the plan explicitly requires build-system diagnosis.
-- If canonical validation fails only because of an out-of-scope path/problem, report that fact and stop instead of chasing it.
+- Project roots are read/search scope only; they do not expand write scope.
+- Prefer targeted edits to existing files. Use the smallest edit that satisfies the task.
+- Do not regenerate or replace an entire existing file when localized edits are sufficient.
+- Preserve the target file's existing encoding, BOM state, and line endings. Do not run encoding experiments, conversions, or generic BOM normalization unless the task/project constraints explicitly require them or an actual encoding problem is detected.
+- If Vietnamese text appears corrupted or mojibake is detected, stop rather than guessing an encoding/transcoding fix.
+- When run_command is already executing PowerShell on Windows, run PowerShell expressions directly; do not wrap them in nested `powershell -Command` / `powershell -NoProfile -Command` invocations.
+- Run only CANONICAL VALIDATION when one is supplied. Do not probe for alternate build tools, restore strategies, or build variants unless the task itself is build/toolchain diagnosis.
+- If CANONICAL VALIDATION fails only because of an out-of-scope problem, report that fact and stop instead of chasing it.
+- Do not investigate or repair unrelated failures outside this plan's scope.
 - Once the Owned Paths satisfy acceptance criteria and canonical validation passes, stop investigating and emit FINAL_STATUS immediately.
 ```
 
-For narrow DTO/view/config-only work, keep investigation narrow. Do not run multiple whole-solution build variants merely to obtain a cleaner report unless the task itself concerns the build/toolchain.
+For narrow DTO/view/config/documentation work, keep investigation narrow. Do not run multiple whole-solution build variants merely to obtain a cleaner report unless the task itself concerns the build/toolchain.
+
+Machine-specific validation paths or commands belong in Codex/user/project rules, not in this plugin skill. Codex resolves the applicable command and supplies it under `CANONICAL VALIDATION`.
+
+## Correction-turn edit strategy
+
+Correction turns should be materially narrower than initial implementation turns.
+
+When Codex review reports specific findings:
+
+- Patch only the reported findings unless resolving them strictly requires a broader change.
+- Re-read only the affected region plus the minimum surrounding context needed to edit safely.
+- Prefer localized replace/edit operations over full-file regeneration.
+- Do not re-run repository discovery, architecture research, or unrelated validation.
+- Preserve unrelated user/workspace changes exactly as they are.
+- Re-run the supplied canonical validation only when the correction can affect it or Codex explicitly requests it.
+- Return `FINAL_STATUS` as soon as the findings are resolved and required validation passes.
+
+Full-file replacement is appropriate for a new file, or when the requested change genuinely affects most of an existing file. It is not the default correction mechanism.
 
 ## Sequential completion contract
 
@@ -94,7 +139,7 @@ For each requested plan step:
 2. `agy_wait` until the turn reaches a terminal result.
 3. Independently review the diff and run the required canonical validation.
 4. Judge PASS/FAIL from that independent review, not solely from `agyStatus`.
-5. On review FAIL, `agy_followup` with a stable correction key, then `agy_wait` and review again.
+5. On review FAIL, `agy_followup` with a stable correction key containing only concrete review findings, then `agy_wait` and review again.
 6. Repeat until PASS or a genuine BLOCKED condition requires user action.
 7. `agy_close` after PASS.
 8. Move to the next requested plan step.
@@ -187,7 +232,7 @@ Treat the persisted worker metadata and AGY conversation as an audit trail of vi
 
 When MCP tools are unavailable, use the bundled `scripts/agy-delegate.mjs` runner. It requires Node.js 20 or newer and a locally installed, authenticated `agy` CLI.
 
-Write the complete prompt to a temporary UTF-8 file and pass its absolute path to the runner. Do not interpolate an untrusted prompt into shell syntax.
+Write the complete prompt to a temporary UTF-8 file and pass its absolute path to the runner. This temporary prompt-file encoding rule does not imply anything about source-file encoding in the target repository. Do not interpolate an untrusted prompt into shell syntax.
 
 ```text
 node <skill-dir>/scripts/agy-delegate.mjs --cwd <absolute-workspace> --mode plan --prompt-file <absolute-prompt-file> --model <model> --effort <low|medium|high>
