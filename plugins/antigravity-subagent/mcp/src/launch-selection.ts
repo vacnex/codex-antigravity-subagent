@@ -42,7 +42,12 @@ export type LaunchSelectionError = {
   error: string;
 };
 
-export type LaunchSelectionResult = LaunchSelectionReady | LaunchSelectionError | InputRequiredResult;
+export type LaunchSelectionInputRequired = InputRequiredResult & {
+  resultType: 'input_required';
+  inputRequests: InputRequiredResult['inputRequests'];
+};
+
+export type LaunchSelectionResult = LaunchSelectionReady | LaunchSelectionError | LaunchSelectionInputRequired;
 
 type ModelFamily = {
   value: string;
@@ -192,7 +197,7 @@ export async function resolveLaunchSelection(
           requestedSchema,
         }),
       },
-    });
+    }) as LaunchSelectionInputRequired;
   }
 
   let project: AgyProject | undefined;
