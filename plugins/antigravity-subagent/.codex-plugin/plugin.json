@@ -1,6 +1,6 @@
 {
   "name": "antigravity-subagent",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "description": "Delegate bounded tasks from Codex to persistent, recoverable Google Antigravity CLI workers through a skill or MCP tools.",
   "author": {
     "name": "IlleJiViN"
@@ -8,7 +8,13 @@
   "license": "MIT",
   "homepage": "https://github.com/vacnex/codex-antigravity-subagent",
   "repository": "https://github.com/vacnex/codex-antigravity-subagent",
-  "keywords": ["antigravity", "agy", "mcp", "subagent", "delegation"],
+  "keywords": [
+    "antigravity",
+    "agy",
+    "mcp",
+    "subagent",
+    "delegation"
+  ],
   "skills": "./skills/",
   "mcpServers": "./.mcp.json",
   "interface": {
@@ -18,7 +24,12 @@
     "developerName": "IlleJiViN",
     "websiteURL": "https://github.com/vacnex/codex-antigravity-subagent",
     "category": "Developer Tools",
-    "capabilities": ["MCP Tools", "Local CLI", "Delegation", "Code Review"],
+    "capabilities": [
+      "MCP Tools",
+      "Local CLI",
+      "Delegation",
+      "Code Review"
+    ],
     "defaultPrompt": [
       "Use Antigravity as a subagent to review this approach.",
       "Delegate this bounded research task to Antigravity.",

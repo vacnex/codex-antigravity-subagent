@@ -31,6 +31,12 @@ try {
     mode: 'accept-edits',
     model: 'gemini-example-high',
     effort: 'high',
+    agyProjectId: 'project-a',
+    agyProjectName: 'Project A',
+    agyProjectRoots: ['D:/repo', 'D:/shared'],
+    agyProjectResolution: 'selected',
+    agyProjectRegistryDir: 'C:/Users/test/.gemini/config/projects',
+    agyWorkspaceAttested: true,
     createdAt,
     updatedAt: createdAt,
     lastActivityAt: createdAt,
@@ -76,9 +82,15 @@ try {
   assert.equal(readUpdated.lastTurnKind, 'start');
   assert.equal(readUpdated.lastTurnKey, 'task-20260904-plan-1');
   assert.equal(readUpdated.lastResultStatus, 'SUCCESS');
+  assert.equal(readUpdated.agyProjectId, 'project-a');
+  assert.deepEqual(readUpdated.agyProjectRoots, ['D:/repo', 'D:/shared']);
+  assert.equal(readUpdated.agyWorkspaceAttested, true);
 
   assert.equal(isWorkerLedgerRecord({ ...updated, activeTurnKind: 'bogus' }), false);
   assert.equal(isWorkerLedgerRecord({ ...updated, idempotencyKey: 42 }), false);
+  assert.equal(isWorkerLedgerRecord({ ...updated, agyProjectRoots: 'D:/repo' }), false);
+  assert.equal(isWorkerLedgerRecord({ ...updated, agyProjectResolution: 'guessed' }), false);
+  assert.equal(isWorkerLedgerRecord({ ...updated, agyWorkspaceAttested: 'yes' }), false);
 
   const owner1 = 'mcp_owner_1';
   const owner2 = 'mcp_owner_2';
@@ -86,6 +98,8 @@ try {
   const firstLease = await store.acquireLease(initial.workerId, owner1, 60_000);
   assert.equal(firstLease.acquired, true);
   assert.equal(firstLease.lease?.ownerId, owner1);
+  const activeLease = await store.readActiveLease(initial.workerId);
+  assert.equal(activeLease?.ownerId, owner1);
   const blocked = await store.acquireLease(initial.workerId, owner2, 60_000);
   assert.equal(blocked.acquired, false);
   assert.match(blocked.reason ?? '', /leased by MCP process/);
@@ -93,6 +107,7 @@ try {
   assert.equal(await store.releaseLease(initial.workerId, owner2), false);
   assert.equal(await store.releaseLease(initial.workerId, owner1), true);
   assert.equal(await store.readLease(initial.workerId), undefined);
+  assert.equal(await store.readActiveLease(initial.workerId), undefined);
 
   await writeFile(store.leasePath(initial.workerId), JSON.stringify({
     schemaVersion: 1,
@@ -102,6 +117,7 @@ try {
     acquiredAt: new Date().toISOString(),
     expiresAt: new Date(Date.now() + 60_000).toISOString(),
   }), 'utf8');
+  assert.equal(await store.readActiveLease(initial.workerId), undefined, 'dead process lease must not be reported active');
   const contenders = await Promise.all([
     store.acquireLease(initial.workerId, owner2, 60_000),
     store.acquireLease(initial.workerId, owner3, 60_000),
@@ -111,6 +127,7 @@ try {
   assert.ok(winner === owner2 || winner === owner3);
   const liveLease = await store.readLease(initial.workerId);
   assert.equal(liveLease?.ownerId, winner);
+  assert.equal((await store.readActiveLease(initial.workerId))?.ownerId, winner);
   await store.releaseLease(initial.workerId, winner);
 
   // Build the next expected record from the actual disk representation. JSON persistence

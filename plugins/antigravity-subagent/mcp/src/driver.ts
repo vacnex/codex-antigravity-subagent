@@ -3,6 +3,7 @@ import { once } from 'node:events';
 import { createInterface } from 'node:readline';
 
 import { terminateChildProcess } from './cli.js';
+import { canonicalProjectPath } from './projects.js';
 import {
   parseAgyStreamLine,
   type AgyStreamEvent,
@@ -55,10 +56,12 @@ export class AgyPersistentDriver {
   private readonly maxDiagnosticBytes: number;
   private readonly onEvent?: (event: AgyStreamEvent) => void;
   private readonly onExit?: (exitCode: number | null) => void;
+  private readonly expectedCwd: string;
   private readonly parentExitHandler: () => void;
   private readonly initPromise: Promise<AgyStreamInitEvent | undefined>;
   private resolveInit!: (event: AgyStreamInitEvent | undefined) => void;
   private initSettled = false;
+  private initError?: Error;
   private stderrTail: Buffer<ArrayBufferLike> = Buffer.alloc(0);
   private diagnosticsTruncated = false;
   private pending?: PendingTurn;
@@ -72,6 +75,7 @@ export class AgyPersistentDriver {
     this.maxDiagnosticBytes = options.maxDiagnosticBytes ?? 8 * 1024;
     this.onEvent = options.onEvent;
     this.onExit = options.onExit;
+    this.expectedCwd = options.cwd;
     this.initPromise = new Promise<AgyStreamInitEvent | undefined>((resolve) => {
       this.resolveInit = resolve;
     });
@@ -129,6 +133,7 @@ export class AgyPersistentDriver {
 
   async waitForInit(timeoutMs = 15_000, signal?: AbortSignal): Promise<AgyStreamInitEvent | undefined> {
     if (this.initEvent) return this.initEvent;
+    if (this.initError) throw this.initError;
     if (!this.isAlive) return undefined;
     if (signal?.aborted) return undefined;
 
@@ -145,7 +150,9 @@ export class AgyPersistentDriver {
       : new Promise<undefined>(() => undefined);
 
     try {
-      return await Promise.race([this.initPromise, timeoutPromise, abortPromise]);
+      const result = await Promise.race([this.initPromise, timeoutPromise, abortPromise]);
+      if (!result && this.initError) throw this.initError;
+      return result;
     } finally {
       if (timeout) clearTimeout(timeout);
       if (signal && onAbort) signal.removeEventListener('abort', onAbort);
@@ -217,13 +224,28 @@ export class AgyPersistentDriver {
     const event = parseAgyStreamLine(line);
     if (!event) return;
     this.lastActivity = Date.now();
-    this.onEvent?.(event);
     if (event.event === 'init') {
+      if (!event.cwd) {
+        this.initError = new Error(`Antigravity stream init did not report cwd; expected ${this.expectedCwd}.`);
+        this.settleInit(undefined);
+        void terminateChildProcess(this.child);
+        return;
+      }
+      const expected = canonicalProjectPath(this.expectedCwd);
+      const actual = canonicalProjectPath(event.cwd);
+      if (expected !== actual) {
+        this.initError = new Error(`Antigravity workspace mismatch: expected ${this.expectedCwd}, got ${event.cwd}.`);
+        this.settleInit(undefined);
+        void terminateChildProcess(this.child);
+        return;
+      }
       this.acceptConversationId(event.conversationId);
       this.initEvent = event;
+      this.onEvent?.(event);
       this.settleInit(event);
       return;
     }
+    this.onEvent?.(event);
     if (event.event !== 'result') return;
     this.acceptConversationId(event.conversationId);
     const pending = this.detachPending();
