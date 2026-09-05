@@ -6,6 +6,7 @@ import path from 'node:path';
 
 import type { ServerContext } from '@modelcontextprotocol/server';
 
+import { appendAgyProjectArgs } from './launch-context.js';
 import {
   detectAgyStreamingCapabilities,
   type AgyStreamingCapabilities,
@@ -545,6 +546,7 @@ export function buildOneShotArgs(
   outputFormat: 'text' | 'json' = 'json',
 ): string[] {
   const args = ['--print', prompt, '--output-format', outputFormat, '--mode', worker.mode];
+  appendAgyProjectArgs(args, conversationId);
   appendModelAndEffortArgs(args, worker.model, worker.effort);
   if (worker.agent) args.push('--agent', worker.agent);
   if (conversationId) args.push('--conversation', conversationId);
@@ -553,6 +555,7 @@ export function buildOneShotArgs(
 
 export function buildPersistentArgs(worker: WorkerExecutionOptions, conversationId?: string): string[] {
   const args = ['--input-format', 'stream-json', '--output-format', 'stream-json', '--mode', worker.mode];
+  appendAgyProjectArgs(args, conversationId);
   appendModelAndEffortArgs(args, worker.model, worker.effort);
   if (worker.agent) args.push('--agent', worker.agent);
   if (conversationId) args.push('--conversation', conversationId);
