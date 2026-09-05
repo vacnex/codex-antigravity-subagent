@@ -181,8 +181,18 @@ export function resolveAgyProject(
   platform: NodeJS.Platform = process.platform,
 ): AgyProjectResolution {
   if (explicitProjectId) {
-    const project = projects.find((entry) => entry.id === explicitProjectId || entry.name === explicitProjectId);
-    if (!project) return { kind: 'error', error: `Unknown Antigravity project: ${explicitProjectId}.` };
+    const exactId = projects.find((entry) => entry.id === explicitProjectId);
+    const nameMatches = exactId ? [] : projects.filter((entry) => entry.name === explicitProjectId);
+    if (!exactId && nameMatches.length === 0) {
+      return { kind: 'error', error: `Unknown Antigravity project: ${explicitProjectId}.` };
+    }
+    if (!exactId && nameMatches.length > 1) {
+      return {
+        kind: 'error',
+        error: `Antigravity project name ${explicitProjectId} is ambiguous. Pass an exact project ID instead.`,
+      };
+    }
+    const project = exactId ?? nameMatches[0];
     if (!project.roots.some((root) => projectContainsPath(root, cwd, platform))) {
       return { kind: 'error', error: `Antigravity project ${project.name} (${project.id}) does not contain workspace ${cwd}.` };
     }
