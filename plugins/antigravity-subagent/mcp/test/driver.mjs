@@ -54,6 +54,7 @@ lines.on('line', async (line) => {
 
   const init = await driver.waitForInit(1_000);
   assert.equal(init?.conversationId, 'driver-conversation-1');
+  assert.equal(init?.cwd, tempDir);
   assert.equal(driver.currentConversationId, 'driver-conversation-1');
   assert.equal(driver.isBusy, false);
 
@@ -115,6 +116,26 @@ lines.on('line', async (line) => {
   const noInitDriver = new AgyPersistentDriver({ command: process.execPath, args: [neverInit], cwd: tempDir });
   assert.equal(await noInitDriver.waitForInit(20), undefined);
   await noInitDriver.close(10);
+
+  const missingCwdAgy = path.join(tempDir, 'missing-cwd.mjs');
+  await writeFile(missingCwdAgy, `console.log(JSON.stringify({ event: 'init', conversation_id: 'missing-cwd', init: {} })); setTimeout(() => {}, 10000);`, 'utf8');
+  const missingCwdDriver = new AgyPersistentDriver({ command: process.execPath, args: [missingCwdAgy], cwd: tempDir });
+  await assert.rejects(() => missingCwdDriver.waitForInit(1_000), /did not report cwd/);
+  await sleep(100);
+  assert.equal(missingCwdDriver.isAlive, false);
+
+  const wrongCwdAgy = path.join(tempDir, 'wrong-cwd.mjs');
+  await writeFile(wrongCwdAgy, `
+console.log(JSON.stringify({ event: 'init', conversation_id: 'wrong-cwd', init: { cwd: ${JSON.stringify(path.join(tempDir, 'somewhere-else'))} } }));
+process.stdin.on('data', () => { console.error('PROMPT_SHOULD_NOT_BE_SENT'); process.exitCode = 17; });
+setTimeout(() => {}, 10000);
+`, 'utf8');
+  const mismatchEvents = [];
+  const mismatchDriver = new AgyPersistentDriver({ command: process.execPath, args: [wrongCwdAgy], cwd: tempDir, onEvent: (event) => mismatchEvents.push(event) });
+  await assert.rejects(() => mismatchDriver.waitForInit(1_000), /workspace mismatch/);
+  assert.equal(mismatchEvents.length, 0, 'invalid init must not be surfaced as an accepted AGY event');
+  await sleep(100);
+  assert.equal(mismatchDriver.isAlive, false);
 
   console.error('AGY persistent driver test passed');
 } finally {
