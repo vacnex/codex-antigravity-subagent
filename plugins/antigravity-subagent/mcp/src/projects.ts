@@ -57,7 +57,7 @@ export function canonicalProjectPath(value: string, platform: NodeJS.Platform = 
   const withoutTrailing = platform === 'win32'
     ? resolved.replace(/[\\/]+$/, '')
     : resolved.replace(/\/+$/, '');
-  const normalized = withoutTrailing || parsedRoot;
+  const normalized = resolved === parsedRoot ? parsedRoot : withoutTrailing || parsedRoot;
   return platform === 'win32' ? normalized.toLowerCase() : normalized;
 }
 
