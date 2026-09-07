@@ -99,7 +99,7 @@ For every PLAN, use all canonical `####` headings below exactly. Content may be 
 
 ### Required PLAN schema
 
-```markdown
+````markdown
 ### PLAN-01: <short objective>
 
 #### Depends on
@@ -139,7 +139,7 @@ None
 
 #### Stop if
 <conditions that require supervisor re-planning instead of worker inference>
-```
+````
 
 For `Depends on`, use `None` or list PLAN IDs. For optional empty scopes, use exactly `None`.
 
