@@ -12,6 +12,7 @@ const packageJson = JSON.parse(await readFile(path.join(mcpRoot, 'package.json')
 const lockJson = JSON.parse(await readFile(path.join(mcpRoot, 'package-lock.json'), 'utf8'));
 const pluginJson = JSON.parse(await readFile(path.join(pluginRoot, '.codex-plugin', 'plugin.json'), 'utf8'));
 const indexSource = await readFile(path.join(mcpRoot, 'src', 'index.ts'), 'utf8');
+const blueprintSource = await readFile(path.join(mcpRoot, 'src', 'blueprint.ts'), 'utf8');
 const blueprintSkill = await readFile(path.join(pluginRoot, 'skills', 'execution-blueprint', 'SKILL.md'), 'utf8');
 const executeSkill = await readFile(path.join(pluginRoot, 'skills', 'execute-plan', 'SKILL.md'), 'utf8');
 
@@ -32,6 +33,12 @@ assert.ok(startPlanSchema, 'agy_start_plan input schema must be discoverable');
 assert.doesNotMatch(startPlanSchema, /\bprompt\s*:/, 'agy_start_plan must never accept repeated PLAN prompt text');
 assert.match(startPlanSchema, /planId\s*:/);
 assert.match(startPlanSchema, /runId\s*:/);
+
+assert.match(blueprintSource, /function\s+gitHeadsMatch\(/);
+assert.match(blueprintSource, /export function assertBlueprintFresh\(/);
+assert.match(blueprintSource, /BLUEPRINT_STALE/);
+assert.match(blueprintSource, /BLUEPRINT_FRESHNESS_UNAVAILABLE/);
+assert.match(blueprintSource, /assertBlueprintFresh\(blueprint\);/);
 
 assert.match(blueprintSkill, /<!-- AGY_BLUEPRINT:v1:START -->/);
 assert.match(blueprintSkill, /<!-- AGY_BLUEPRINT:v1:END -->/);
