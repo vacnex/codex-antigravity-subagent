@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { access } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import path from 'node:path';
@@ -6,19 +8,15 @@ import { McpServer } from '@modelcontextprotocol/server';
 import { serveStdio } from '@modelcontextprotocol/server/stdio';
 import * as z from 'zod/v4';
 
-import {
-  buildOneShotArgs,
-  findAgy,
-  probeAgyCapabilities,
-  runAgy,
-  type Effort,
-  type RunMode,
-} from './cli.js';
+import { findAgy, probeAgyCapabilities, type Effort } from './cli.js';
+import { BlueprintStore } from './blueprint-store.js';
+import { findPlan, workspaceMatches } from './blueprint.js';
+import { captureLatestBlueprintFromThread } from './codex-transcript.js';
+import { capturePlanBaseline } from './git-baseline.js';
 import { withAgyProjectLaunch } from './launch-context.js';
-import {
-  resolveLaunchSelection,
-  type LaunchSelectionReady,
-} from './launch-selection.js';
+import { resolveLaunchSelection, type LaunchSelectionReady } from './launch-selection.js';
+import { buildCorrectionPrompt, buildInitialPlanPrompt, type ReviewFinding } from './plan-prompt.js';
+import { buildPlanReviewBundle } from './plan-review.js';
 import {
   discoverAgyProjects,
   projectContainsPath,
@@ -27,9 +25,11 @@ import {
   type AgyProjectRegistry,
 } from './projects.js';
 import { normalizeManagedResult } from './result-semantics.js';
+import { RunStore, type ExecutionRunRecord } from './run-store.js';
 import { WorkerRuntime, type RuntimeToolResult } from './runtime.js';
 
-const VERSION = '0.4.3';
+const packagePath = path.resolve(path.dirname(process.argv[1] ?? '.'), '..', 'package.json');
+const VERSION = (JSON.parse(readFileSync(packagePath, 'utf8')) as { version: string }).version;
 const WAIT_POLL_MS = 1_000;
 const NEW_PROJECT_DISCOVERY_MS = 3_000;
 const NEW_PROJECT_DISCOVERY_POLL_MS = 100;
@@ -207,15 +207,30 @@ async function discoverCreatedProject(
   }
 }
 
+function getThreadId(meta: unknown): string | undefined {
+  if (!meta || typeof meta !== 'object') return undefined;
+  const value = (meta as Record<string, unknown>).threadId;
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+function attachRunMetadata(result: RuntimeToolResult, run: ExecutionRunRecord, planId: string): RuntimeToolResult {
+  result.structuredContent.runId = run.runId;
+  result.structuredContent.blueprintId = run.blueprintId;
+  result.structuredContent.planId = planId;
+  return result;
+}
+
 async function createServer(): Promise<McpServer> {
   const runtime = new WorkerRuntime();
+  const blueprintStore = new BlueprintStore();
+  const runStore = new RunStore();
   await runtime.ensureRecovered();
 
   const server = new McpServer(
     { name: 'agy-mcp-server', version: VERSION },
     {
       instructions:
-        'Use agy_check before first delegation. New AGY workers are resolved into an Antigravity Project from the requested cwd; when multiple equally specific Projects contain that path, let the MCP setup form ask the user which Project to use, and then pass the returned agyProjectId to subsequent plan-step starts in the same blueprint. Model/effort/project setup uses MCP input_required rather than push-style elicitation. Managed agy_start/agy_followup launches return quickly while AGY continues in the background; use agy_wait as the normal completion barrier. A RUNNING worker or passive wait timeout is not a reason to end a requested multi-step plan. A terminal AGY status=ERROR is not automatically an implementation failure: audit the workspace first, and only send agy_followup when the independent review actually fails. Pass stable idempotency keys, use agy_cancel for active turns, and agy_close only after review passes.',
+        'Codex owns repository planning and semantic review. For approved AGY_BLUEPRINT:v1 plans, use agy_start_plan so the MCP server captures the canonical blueprint from the current Codex thread, persists it locally, reconstructs the PLAN prompt server-side, and keeps large repeated handoff text out of Codex tool output. Use agy_review_plan for deterministic scope/diff/validation evidence, then independently review semantics. Send PLAN corrections through agy_followup findings rather than repeating the original PLAN. Use agy_start for standalone bounded delegation. Use agy_wait as the completion barrier, agy_status for lifecycle recovery, agy_cancel for active turns, and agy_close only after the supervising workflow no longer needs corrections.',
     },
   );
 
@@ -251,6 +266,7 @@ async function createServer(): Promise<McpServer> {
         content: [{ type: 'text', text: lines.join('\n') }],
         structuredContent: {
           available: true,
+          serverVersion: VERSION,
           executable,
           version: report.version,
           capabilities: report.capabilities,
@@ -268,88 +284,17 @@ async function createServer(): Promise<McpServer> {
   );
 
   server.registerTool(
-    'agy_delegate',
-    {
-      title: 'Delegate to Antigravity',
-      description: 'Run one bounded one-shot prompt through Google Antigravity CLI. Prefer agy_start when follow-up review may be needed.',
-      inputSchema: z.object({
-        prompt: z.string().min(1).max(100_000),
-        cwd: z.string().min(1),
-        projectId: z.string().min(1).max(200).optional().describe('Explicit Antigravity Project id/name; otherwise resolve from cwd'),
-        mode: z.enum(['plan', 'default', 'accept-edits']).default('plan'),
-        outputFormat: z.enum(['text', 'json']).default('text'),
-        timeoutSeconds: z.number().int().min(1).max(1800).default(900),
-        agent: z.string().min(1).max(200).optional(),
-        model: z.string().min(1).max(200).optional(),
-        effort: z.enum(['low', 'medium', 'high']).optional(),
-      }),
-      annotations: { readOnlyHint: false, openWorldHint: true, destructiveHint: true, idempotentHint: false },
-    },
-    async ({ prompt, cwd, projectId, mode, outputFormat, timeoutSeconds, agent, model, effort }, ctx) => {
-      const executable = await findAgy();
-      if (!executable) return { content: [{ type: 'text', text: 'Antigravity CLI was not found. Run agy_check first.' }], isError: true };
-      const resolvedCwd = path.resolve(cwd);
-      try { await access(resolvedCwd, constants.R_OK); } catch {
-        return { content: [{ type: 'text', text: `Workspace is not accessible: ${resolvedCwd}` }], isError: true };
-      }
-      const registry = await discoverAgyProjects();
-      const resolution = resolveAgyProject(resolvedCwd, registry.projects, projectId);
-      const selection = await resolveLaunchSelection(ctx, {
-        executable,
-        cwd: resolvedCwd,
-        requestedModel: model,
-        requestedEffort: effort as Effort | undefined,
-        projectResolution: resolution,
-      });
-      if ('inputRequests' in selection) return selection;
-      if (selection.kind === 'error') return textError(selection.error, selection.code);
-      const execution = { cwd: resolvedCwd, mode: mode as RunMode, agent, model: selection.model, effort: selection.effort };
-      try {
-        const result = await withAgyProjectLaunch(selection.projectLaunch, () => runAgy(
-          executable,
-          buildOneShotArgs(prompt, execution, undefined, outputFormat),
-          resolvedCwd,
-          timeoutSeconds * 1000,
-          { signal: ctx.mcpReq.signal },
-        ));
-        const output = result.stdout.trim() || result.stderr.trim() || '(Antigravity returned no output)';
-        return {
-          content: [{ type: 'text', text: output }],
-          structuredContent: {
-            exitCode: result.exitCode,
-            timedOut: result.timedOut,
-            canceled: result.canceled,
-            truncated: result.truncated,
-            mode,
-            cwd: resolvedCwd,
-            model: selection.model,
-            effort: selection.effort,
-            agyProjectId: selection.project?.id,
-            agyProjectName: selection.project?.name,
-            agyProjectRoots: selection.project?.roots,
-            agyProjectResolution: selection.projectResolution,
-            agyWorkspaceAttested: true,
-          },
-          isError: result.timedOut || result.canceled || result.exitCode !== 0,
-        };
-      } catch (error) {
-        return { content: [{ type: 'text', text: `Failed to run Antigravity: ${error instanceof Error ? error.message : String(error)}` }], isError: true };
-      }
-    },
-  );
-
-  server.registerTool(
     'agy_start',
     {
       title: 'Start Antigravity Worker',
-      description: 'Start a persistent/resumable managed Antigravity worker. The cwd is resolved into an Antigravity Project before launch, and stream init must attest the requested workspace before any prompt is sent.',
+      description: 'Start one standalone persistent/resumable Antigravity worker from a bounded prompt. Approved multi-PLAN execution should use agy_start_plan instead.',
       inputSchema: z.object({
         prompt: z.string().min(1).max(100_000),
-        name: z.string().min(1).max(120).optional().describe('Friendly plan-step name stored only in the local worker ledger'),
-        idempotencyKey: z.string().min(1).max(200).optional().describe('Stable key for retries of the same logical plan step; prevents duplicate workers'),
+        name: z.string().min(1).max(120).optional().describe('Friendly assignment name stored only in the local worker ledger'),
+        idempotencyKey: z.string().min(1).max(200).optional().describe('Stable key for retries of the same logical assignment; prevents duplicate workers'),
         cwd: z.string().min(1),
-        projectId: z.string().min(1).max(200).optional().describe('Explicit Antigravity Project id/name. Reuse the first plan step agyProjectId for later steps in the same blueprint.'),
-        mode: z.enum(['plan', 'default', 'accept-edits']).default('accept-edits'),
+        projectId: z.string().min(1).max(200).optional().describe('Explicit Antigravity Project id/name; otherwise resolve from cwd'),
+        mode: z.enum(['plan', 'default', 'accept-edits']).default('plan'),
         timeoutSeconds: z.number().int().min(1).max(1800).default(900),
         agent: z.string().min(1).max(200).optional(),
         model: z.string().min(1).max(200).optional(),
@@ -360,14 +305,14 @@ async function createServer(): Promise<McpServer> {
     async ({ prompt, name, idempotencyKey, cwd, projectId, mode, timeoutSeconds, agent, model, effort }, ctx) => {
       const resolvedCwd = path.resolve(cwd);
       try { await access(resolvedCwd, constants.R_OK); } catch {
-        return { content: [{ type: 'text', text: `Workspace is not accessible: ${resolvedCwd}` }], isError: true };
+        return textError(`Workspace is not accessible: ${resolvedCwd}`, 'WORKSPACE_UNAVAILABLE');
       }
 
       const reused = await runtime.reuseExistingStart({ name, cwd: resolvedCwd, idempotencyKey });
       if (reused) return normalizeManagedResult(await decorateProjectMetadata(reused, runtime));
 
       const executable = await findAgy();
-      if (!executable) return { content: [{ type: 'text', text: 'Antigravity CLI was not found. Run agy_check first.' }], isError: true };
+      if (!executable) return textError('Antigravity CLI was not found. Run agy_check first.', 'AGY_NOT_FOUND');
       const registryBefore = await discoverAgyProjects();
       const resolution = resolveAgyProject(resolvedCwd, registryBefore.projects, projectId);
       const selection = await resolveLaunchSelection(ctx, {
@@ -427,42 +372,244 @@ async function createServer(): Promise<McpServer> {
   );
 
   server.registerTool(
+    'agy_start_plan',
+    {
+      title: 'Start Approved Blueprint PLAN',
+      description: 'Start one PLAN-XX from the canonical AGY_BLUEPRINT:v1 in the current Codex thread. The server captures/persists the blueprint and builds the long AGY prompt without requiring Codex to repeat PLAN text.',
+      inputSchema: z.object({
+        planId: z.string().regex(/^PLAN-\d{2,}$/),
+        runId: z.string().regex(/^run_[A-Za-z0-9-]{8,}$/).optional().describe('Reuse an existing execution run. Omit for the first PLAN so the server captures the current thread blueprint.'),
+        cwd: z.string().min(1).optional().describe('Required only when creating the execution run; later PLANs reuse the run workspace.'),
+        projectId: z.string().min(1).max(200).optional().describe('Optional first-run Project selection; later PLANs reuse the pinned Project.'),
+        timeoutSeconds: z.number().int().min(1).max(1800).default(900),
+        agent: z.string().min(1).max(200).optional(),
+        model: z.string().min(1).max(200).optional(),
+        effort: z.enum(['low', 'medium', 'high']).optional(),
+      }),
+      annotations: { readOnlyHint: false, openWorldHint: true, destructiveHint: true, idempotentHint: true },
+    },
+    async ({ planId, runId, cwd, projectId, timeoutSeconds, agent, model, effort }, ctx) => {
+      let run: ExecutionRunRecord;
+      let stored;
+      if (runId) {
+        try {
+          run = await runStore.read(runId);
+          stored = await blueprintStore.read(run.blueprintId);
+        } catch (error) {
+          return textError(error instanceof Error ? error.message : String(error), 'EXECUTION_RUN_UNAVAILABLE');
+        }
+        if (cwd && path.resolve(cwd) !== path.resolve(run.cwd)) {
+          return textError(`Requested cwd does not match execution run workspace: ${run.cwd}`, 'BLUEPRINT_WORKSPACE_MISMATCH');
+        }
+      } else {
+        if (!cwd) return textError('cwd is required when starting the first PLAN of an execution run.', 'WORKSPACE_REQUIRED');
+        const resolvedCwd = path.resolve(cwd);
+        const threadId = getThreadId(ctx.mcpReq._meta);
+        if (!threadId) {
+          return textError('Codex did not provide threadId MCP metadata; blueprint capture cannot proceed without regenerating text.', 'BLUEPRINT_CAPTURE_UNAVAILABLE');
+        }
+        try {
+          await access(resolvedCwd, constants.R_OK);
+          const captured = await captureLatestBlueprintFromThread(threadId);
+          stored = await blueprintStore.save(captured.canonicalText, threadId);
+          if (!workspaceMatches(stored.blueprint.workspace, resolvedCwd)) {
+            return textError(`Blueprint workspace ${stored.blueprint.workspace} does not match requested cwd ${resolvedCwd}.`, 'BLUEPRINT_WORKSPACE_MISMATCH');
+          }
+          run = await runStore.create({ blueprintId: stored.blueprintId, threadId, cwd: resolvedCwd });
+        } catch (error) {
+          return textError(error instanceof Error ? error.message : String(error), 'BLUEPRINT_CAPTURE_UNAVAILABLE');
+        }
+      }
+
+      if (stored.blueprint.status !== 'READY') {
+        return textError(`Blueprint ${stored.blueprintId} is ${stored.blueprint.status}; only READY blueprints can execute.`, 'BLUEPRINT_NOT_READY');
+      }
+      let plan;
+      try {
+        plan = findPlan(stored.blueprint, planId);
+      } catch (error) {
+        return textError(error instanceof Error ? error.message : String(error), 'PLAN_NOT_FOUND');
+      }
+
+      const existingState = run.plans[planId];
+      if (existingState?.workerId) {
+        let existing = describeRunningResult(await runtime.result(existingState.workerId), existingState.workerId);
+        existing = await decorateProjectMetadata(existing, runtime);
+        existing.structuredContent.reused = true;
+        return normalizeManagedResult(attachRunMetadata(existing, run, planId));
+      }
+
+      const idempotencyKey = existingState?.idempotencyKey ?? `${run.runId}:${planId}`;
+      let baselineId = existingState?.baselineId;
+      if (!baselineId) {
+        try {
+          const baseline = await capturePlanBaseline(run.cwd, plan, runStore.baselineDir(run.runId, planId));
+          baselineId = baseline.baselineId;
+          run.plans[planId] = {
+            ...existingState,
+            idempotencyKey,
+            baselineId,
+            startedAt: new Date().toISOString(),
+          };
+          await runStore.write(run);
+        } catch (error) {
+          return textError(`Failed to capture PLAN baseline: ${error instanceof Error ? error.message : String(error)}`, 'PLAN_BASELINE_FAILED');
+        }
+      }
+
+      const name = `${planId}: ${plan.title}`;
+      const reused = await runtime.reuseExistingStart({ name, cwd: run.cwd, idempotencyKey });
+      if (reused) {
+        const decorated = await decorateProjectMetadata(reused, runtime);
+        const workerId = typeof decorated.structuredContent.workerId === 'string' ? decorated.structuredContent.workerId : undefined;
+        if (workerId) {
+          run = await runStore.attachPlanWorker({
+            runId: run.runId,
+            planId,
+            workerId,
+            conversationId: typeof decorated.structuredContent.conversationId === 'string' ? decorated.structuredContent.conversationId : undefined,
+            idempotencyKey,
+            baselineId,
+            agyProjectId: typeof decorated.structuredContent.agyProjectId === 'string' ? decorated.structuredContent.agyProjectId : undefined,
+            model: typeof decorated.structuredContent.model === 'string' ? decorated.structuredContent.model : undefined,
+            effort: typeof decorated.structuredContent.effort === 'string' ? decorated.structuredContent.effort : undefined,
+          });
+        }
+        decorated.structuredContent.reused = true;
+        return normalizeManagedResult(attachRunMetadata(decorated, run, planId));
+      }
+
+      const executable = await findAgy();
+      if (!executable) return textError('Antigravity CLI was not found. Run agy_check first.', 'AGY_NOT_FOUND');
+      const registryBefore = await discoverAgyProjects();
+      const resolution = resolveAgyProject(run.cwd, registryBefore.projects, run.agyProjectId ?? projectId);
+      const selection = await resolveLaunchSelection(ctx, {
+        executable,
+        cwd: run.cwd,
+        requestedModel: run.model ?? model,
+        requestedEffort: (run.effort ?? effort) as Effort | undefined,
+        projectResolution: resolution,
+      });
+      if ('inputRequests' in selection) return selection;
+      if (selection.kind === 'error') return textError(selection.error, selection.code);
+
+      let prompt: string;
+      try {
+        prompt = await buildInitialPlanPrompt(run.cwd, stored.blueprint, plan);
+      } catch (error) {
+        return textError(`Failed to build ${planId} AGY context: ${error instanceof Error ? error.message : String(error)}`, 'PLAN_CONTEXT_FAILED');
+      }
+
+      const beforeIds = new Set(registryBefore.projects.map((entry) => entry.id));
+      let result = await withAgyProjectLaunch(selection.projectLaunch, () => runtime.start({
+        prompt,
+        name,
+        idempotencyKey,
+        cwd: run.cwd,
+        mode: 'accept-edits',
+        timeoutSeconds,
+        agent,
+        model: selection.model,
+        effort: selection.effort,
+        signal: ctx.mcpReq.signal,
+      }));
+      const workerId = typeof result.structuredContent.workerId === 'string' ? result.structuredContent.workerId : undefined;
+      if (!workerId || result.isError) return normalizeManagedResult(attachRunMetadata(result, run, planId));
+
+      let selectedProject = selection.project;
+      let projectRegistry = registryBefore;
+      let projectWarning: string | undefined;
+      if (selection.projectLaunch.kind === 'new') {
+        const discovered = await discoverCreatedProject(run.cwd, beforeIds);
+        selectedProject = discovered.project;
+        projectRegistry = discovered.registry;
+        projectWarning = discovered.warning;
+      }
+      const metadata = projectMetadata(selection, selectedProject, projectRegistry);
+      const persistenceError = await persistProjectMetadata(runtime, workerId, metadata);
+      Object.assign(result.structuredContent, metadata);
+      if (projectWarning) result.structuredContent.projectWarning = projectWarning;
+      if (persistenceError) result.structuredContent.projectPersistenceError = persistenceError;
+      result = await decorateProjectMetadata(result, runtime);
+      run = await runStore.attachPlanWorker({
+        runId: run.runId,
+        planId,
+        workerId,
+        conversationId: typeof result.structuredContent.conversationId === 'string' ? result.structuredContent.conversationId : undefined,
+        idempotencyKey,
+        baselineId,
+        agyProjectId: typeof result.structuredContent.agyProjectId === 'string' ? result.structuredContent.agyProjectId : undefined,
+        model: selection.model,
+        effort: selection.effort,
+      });
+      result.structuredContent.blueprintCaptured = !runId;
+      result.structuredContent.promptBuiltServerSide = true;
+      return normalizeManagedResult(attachRunMetadata(result, run, planId));
+    },
+  );
+
+  const findingSchema = z.object({
+    file: z.string().min(1).max(500).optional(),
+    symbol: z.string().min(1).max(500).optional(),
+    problem: z.string().min(1).max(8_000),
+    expected: z.string().min(1).max(8_000).optional(),
+    rationale: z.string().min(1).max(8_000).optional(),
+  });
+
+  server.registerTool(
     'agy_followup',
     {
       title: 'Follow Up Antigravity Worker',
-      description: 'Launch review feedback on an existing managed worker. The resumed AGY conversation automatically keeps its associated Antigravity Project.',
+      description: 'Launch a correction turn on an existing worker. For a PLAN-bound worker, prefer structured findings; the server reconstructs the original PLAN and correction policy without Codex repeating them.',
       inputSchema: z.object({
         workerId: z.string().min(1),
-        prompt: z.string().min(1).max(100_000),
-        idempotencyKey: z.string().min(1).max(200).optional().describe('Stable key for retries of this correction turn'),
+        prompt: z.string().min(1).max(100_000).optional().describe('Standalone-worker follow-up prompt. Do not use this to repeat an approved PLAN.'),
+        findings: z.array(findingSchema).min(1).max(50).optional().describe('Supervisor findings for a PLAN-bound worker; MCP rebuilds the correction prompt server-side.'),
+        idempotencyKey: z.string().min(1).max(200).optional().describe('Stable retry key. PLAN findings derive a stable key automatically when omitted.'),
         timeoutSeconds: z.number().int().min(1).max(1800).default(900),
       }),
       annotations: { readOnlyHint: false, openWorldHint: true, destructiveHint: true, idempotentHint: true },
     },
-    async ({ workerId, prompt, idempotencyKey, timeoutSeconds }, ctx) => {
-      const result = await runtime.followup({ workerId, prompt, idempotencyKey, timeoutSeconds, signal: ctx.mcpReq.signal });
-      return normalizeManagedResult(await decorateProjectMetadata(result, runtime));
+    async ({ workerId, prompt, findings, idempotencyKey, timeoutSeconds }, ctx) => {
+      if (Boolean(prompt) === Boolean(findings)) {
+        return textError('Provide exactly one of prompt (standalone worker) or findings (PLAN-bound worker).', 'FOLLOWUP_INPUT_INVALID');
+      }
+      let resolvedPrompt = prompt;
+      let resolvedKey = idempotencyKey;
+      let runBinding: { run: ExecutionRunRecord; planId: string } | undefined;
+      if (findings) {
+        runBinding = await runStore.findByWorkerId(workerId);
+        if (!runBinding) return textError('Structured findings require a PLAN-bound worker.', 'PLAN_WORKER_NOT_FOUND');
+        try {
+          const stored = await blueprintStore.read(runBinding.run.blueprintId);
+          const plan = findPlan(stored.blueprint, runBinding.planId);
+          resolvedPrompt = buildCorrectionPrompt(plan, findings as ReviewFinding[]);
+          resolvedKey ??= `${runBinding.run.runId}:${runBinding.planId}:fix:${createHash('sha256').update(JSON.stringify(findings)).digest('hex').slice(0, 12)}`;
+        } catch (error) {
+          return textError(error instanceof Error ? error.message : String(error), 'PLAN_CORRECTION_CONTEXT_FAILED');
+        }
+      }
+      const result = await runtime.followup({
+        workerId,
+        prompt: resolvedPrompt!,
+        idempotencyKey: resolvedKey,
+        timeoutSeconds,
+        signal: ctx.mcpReq.signal,
+      });
+      const decorated = normalizeManagedResult(await decorateProjectMetadata(result, runtime));
+      if (runBinding) {
+        decorated.structuredContent.promptBuiltServerSide = true;
+        return attachRunMetadata(decorated, runBinding.run, runBinding.planId);
+      }
+      return decorated;
     },
-  );
-
-  server.registerTool(
-    'agy_result',
-    {
-      title: 'Antigravity Worker Result',
-      description: 'Read the current/final result state of the latest managed worker turn without sending a new prompt. Terminal AGY ERROR is reported separately from MCP transport failure; audit the workspace before deciding to correct.',
-      inputSchema: z.object({ workerId: z.string().min(1) }),
-      annotations: { readOnlyHint: true, openWorldHint: false, destructiveHint: false, idempotentHint: true },
-    },
-    async ({ workerId }) => normalizeManagedResult(
-      await decorateProjectMetadata(describeRunningResult(await runtime.result(workerId), workerId), runtime),
-    ),
   );
 
   server.registerTool(
     'agy_wait',
     {
       title: 'Wait for Antigravity Worker',
-      description: 'Passively wait for the latest managed worker turn to finish without sending a prompt or owning/canceling the worker. A terminal AGY error is not automatically an implementation failure.',
+      description: 'Passively wait inside MCP for the latest worker turn to finish. Timeout/cancellation of the waiter never cancels the AGY worker.',
       inputSchema: z.object({
         workerId: z.string().min(1),
         timeoutSeconds: z.number().int().min(1).max(1100).default(900).describe('Maximum passive wait interval; kept below the bundled 1200-second MCP tool timeout'),
@@ -478,22 +625,111 @@ async function createServer(): Promise<McpServer> {
           result.structuredContent.waitCanceled = false;
           result.structuredContent.workerContinues = false;
           result = await decorateProjectMetadata(result, runtime);
-          return normalizeManagedResult(result);
+          const binding = await runStore.findByWorkerId(workerId);
+          return normalizeManagedResult(binding ? attachRunMetadata(result, binding.run, binding.planId) : result);
         }
         if (ctx.mcpReq.signal.aborted) {
           result = annotateWaitExit(result, workerId, 'canceled');
-          return normalizeManagedResult(await decorateProjectMetadata(result, runtime));
+          result = await decorateProjectMetadata(result, runtime);
+          const binding = await runStore.findByWorkerId(workerId);
+          return normalizeManagedResult(binding ? attachRunMetadata(result, binding.run, binding.planId) : result);
         }
         const remaining = deadline - Date.now();
         if (remaining <= 0) {
           result = annotateWaitExit(result, workerId, 'timeout');
-          return normalizeManagedResult(await decorateProjectMetadata(result, runtime));
+          result = await decorateProjectMetadata(result, runtime);
+          const binding = await runStore.findByWorkerId(workerId);
+          return normalizeManagedResult(binding ? attachRunMetadata(result, binding.run, binding.planId) : result);
         }
         const waited = await waitDelay(Math.min(WAIT_POLL_MS, remaining), ctx.mcpReq.signal);
         if (!waited) {
           result = annotateWaitExit(result, workerId, 'canceled');
-          return normalizeManagedResult(await decorateProjectMetadata(result, runtime));
+          result = await decorateProjectMetadata(result, runtime);
+          const binding = await runStore.findByWorkerId(workerId);
+          return normalizeManagedResult(binding ? attachRunMetadata(result, binding.run, binding.planId) : result);
         }
+      }
+    },
+  );
+
+  server.registerTool(
+    'agy_review_plan',
+    {
+      title: 'Prepare PLAN Review Evidence',
+      description: 'Build deterministic review evidence for a PLAN-bound worker: baseline delta, write/forbidden-scope checks, preservation of pre-existing outside-scope changes, canonical validation, and bounded diff. Codex still performs the semantic review and final PASS/FAIL judgment.',
+      inputSchema: z.object({
+        runId: z.string().regex(/^run_[A-Za-z0-9-]{8,}$/),
+        planId: z.string().regex(/^PLAN-\d{2,}$/),
+        validationTimeoutSeconds: z.number().int().min(1).max(1800).default(900),
+      }),
+      annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false, idempotentHint: true },
+    },
+    async ({ runId, planId, validationTimeoutSeconds }, ctx) => {
+      let run: ExecutionRunRecord;
+      try {
+        run = await runStore.read(runId);
+        const stored = await blueprintStore.read(run.blueprintId);
+        const plan = findPlan(stored.blueprint, planId);
+        const state = run.plans[planId];
+        if (!state?.workerId || !state.baselineId) {
+          return textError(`${planId} has no registered PLAN worker/baseline in ${runId}.`, 'PLAN_NOT_STARTED');
+        }
+        const workerState = await runtime.result(state.workerId);
+        if (isRunningResult(workerState)) {
+          return textError(`${planId} worker ${state.workerId} is still running; wait before review.`, 'PLAN_STILL_RUNNING');
+        }
+        const bundle = await buildPlanReviewBundle({
+          cwd: run.cwd,
+          plan,
+          baselineDir: runStore.baselineDir(runId, planId),
+          baselineId: state.baselineId,
+          validationTimeoutSeconds,
+          signal: ctx.mcpReq.signal,
+        });
+        const lines = [
+          `PLAN REVIEW BUNDLE: ${planId}`,
+          `Run: ${runId}`,
+          `Blueprint: ${run.blueprintId}`,
+          `Mechanical status: ${bundle.mechanicalStatus.toUpperCase()}`,
+          `Changed files: ${bundle.changedFiles.length ? bundle.changedFiles.join(', ') : '(none)'}`,
+          `Unauthorized changes: ${bundle.unauthorizedChanges.length ? bundle.unauthorizedChanges.join(', ') : '(none)'}`,
+          `Forbidden changes: ${bundle.forbiddenChanges.length ? bundle.forbiddenChanges.join(', ') : '(none)'}`,
+          `Pre-existing outside-scope changes modified: ${bundle.preExistingOutsideScopeModified.length ? bundle.preExistingOutsideScopeModified.join(', ') : '(none)'}`,
+          '',
+          'APPROVED PLAN',
+          plan.rawMarkdown,
+          '',
+          'CANONICAL VALIDATION RESULT',
+          bundle.validation.skipped
+            ? 'No executable Command/code-fence was declared; perform the blueprint manual validation during semantic review.'
+            : `Command: ${bundle.validation.command}\nExit: ${String(bundle.validation.exitCode)}\nTimed out: ${bundle.validation.timedOut}\nCanceled: ${bundle.validation.canceled}\n${bundle.validation.output}`,
+          '',
+          'WORKSPACE DELTA',
+          bundle.diff || '(No owned-path content delta detected.)',
+        ];
+        return {
+          content: [{ type: 'text', text: lines.join('\n') }],
+          structuredContent: {
+            runId,
+            blueprintId: run.blueprintId,
+            planId,
+            workerId: state.workerId,
+            mechanicalStatus: bundle.mechanicalStatus,
+            changedFiles: bundle.changedFiles,
+            unauthorizedChanges: bundle.unauthorizedChanges,
+            forbiddenChanges: bundle.forbiddenChanges,
+            preExistingOutsideScopeModified: bundle.preExistingOutsideScopeModified,
+            diffTruncated: bundle.diffTruncated,
+            diffIncomplete: bundle.diffIncomplete,
+            validationSkipped: bundle.validation.skipped,
+            validationExitCode: bundle.validation.exitCode,
+            validationTimedOut: bundle.validation.timedOut,
+            validationCanceled: bundle.validation.canceled,
+          },
+          isError: false,
+        };
+      } catch (error) {
+        return textError(error instanceof Error ? error.message : String(error), 'PLAN_REVIEW_FAILED');
       }
     },
   );
@@ -502,11 +738,18 @@ async function createServer(): Promise<McpServer> {
     'agy_status',
     {
       title: 'Antigravity Worker Status',
-      description: 'Inspect one managed worker or list persisted active/recoverable workers, including project binding, timeout/cancel and duplicate-worker metadata.',
+      description: 'Inspect one managed worker or list persisted active/recoverable workers, including Project binding, timeout/cancel and duplicate-worker metadata.',
       inputSchema: z.object({ workerId: z.string().min(1).optional(), includeClosed: z.boolean().default(false) }),
       annotations: { readOnlyHint: true, openWorldHint: false, destructiveHint: false, idempotentHint: true },
     },
-    async ({ workerId, includeClosed }) => decorateProjectMetadata(await runtime.status(workerId, includeClosed), runtime),
+    async ({ workerId, includeClosed }) => {
+      const result = await decorateProjectMetadata(await runtime.status(workerId, includeClosed), runtime);
+      if (workerId) {
+        const binding = await runStore.findByWorkerId(workerId);
+        if (binding) return attachRunMetadata(result, binding.run, binding.planId);
+      }
+      return result;
+    },
   );
 
   server.registerTool(
@@ -517,18 +760,35 @@ async function createServer(): Promise<McpServer> {
       inputSchema: z.object({ workerId: z.string().min(1) }),
       annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false, idempotentHint: true },
     },
-    async ({ workerId }) => decorateProjectMetadata(await runtime.cancel(workerId), runtime),
+    async ({ workerId }) => {
+      const result = await decorateProjectMetadata(await runtime.cancel(workerId), runtime);
+      const binding = await runStore.findByWorkerId(workerId);
+      return binding ? attachRunMetadata(result, binding.run, binding.planId) : result;
+    },
   );
 
   server.registerTool(
     'agy_close',
     {
       title: 'Close Antigravity Worker',
-      description: 'Close a managed worker and retain its local ledger record plus Antigravity conversation/project binding for audit.',
+      description: 'Close a managed worker and retain its local audit metadata plus Antigravity conversation/Project binding. When all workers in a PLAN run close, temporary baseline snapshots are deleted.',
       inputSchema: z.object({ workerId: z.string().min(1) }),
       annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false, idempotentHint: true },
     },
-    async ({ workerId }) => decorateProjectMetadata(await runtime.close(workerId), runtime),
+    async ({ workerId }) => {
+      const result = await decorateProjectMetadata(await runtime.close(workerId), runtime);
+      const closed = await runStore.markWorkerClosed(workerId);
+      if (closed) {
+        attachRunMetadata(result, closed.run, (await runStore.findByWorkerId(workerId))?.planId ?? '');
+        if (closed.allClosed) {
+          await runStore.cleanupBaselines(closed.run.runId).catch((error) => {
+            result.structuredContent.baselineCleanupError = error instanceof Error ? error.message : String(error);
+          });
+          result.structuredContent.baselinesCleaned = closed.allClosed && !result.structuredContent.baselineCleanupError;
+        }
+      }
+      return result;
+    },
   );
 
   return server;
