@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 
 export const BLUEPRINT_START_MARKER = '<!-- AGY_BLUEPRINT:v1:START -->';
@@ -110,6 +111,32 @@ function parseDependsOn(section: string): string[] {
     .filter((value, index, values) => values.indexOf(value) === index);
 }
 
+function gitHeadsMatch(expectedHead: string, currentHead: string): boolean {
+  const expected = expectedHead.trim().toLowerCase();
+  const current = currentHead.trim().toLowerCase();
+  if (expected === current) return true;
+  return /^[0-9a-f]{7,64}$/.test(expected)
+    && /^[0-9a-f]{40,64}$/.test(current)
+    && current.startsWith(expected);
+}
+
+function currentGitHead(workspace: string, expectedHead: string): string {
+  try {
+    const head = execFileSync(
+      'git',
+      ['-C', workspace, 'rev-parse', '--verify', 'HEAD'],
+      { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] },
+    ).trim();
+    if (!head) throw new Error('git rev-parse returned an empty HEAD.');
+    return head;
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `BLUEPRINT_FRESHNESS_UNAVAILABLE: Blueprint recorded Git HEAD ${expectedHead}, but the current HEAD could not be verified for workspace ${workspace}. Re-plan before execution. ${detail}`,
+    );
+  }
+}
+
 export function extractCanonicalBlueprint(text: string): string {
   const normalized = normalizeNewlines(text);
   const start = normalized.lastIndexOf(BLUEPRINT_START_MARKER);
@@ -194,7 +221,18 @@ export function parseBlueprint(canonicalText: string): ExecutionBlueprint {
   };
 }
 
+export function assertBlueprintFresh(blueprint: ExecutionBlueprint): void {
+  if (!blueprint.gitHead) return;
+  const currentHead = currentGitHead(blueprint.workspace, blueprint.gitHead);
+  if (!gitHeadsMatch(blueprint.gitHead, currentHead)) {
+    throw new Error(
+      `BLUEPRINT_STALE: Blueprint Git HEAD ${blueprint.gitHead} does not match current workspace HEAD ${currentHead}. Re-plan before execution.`,
+    );
+  }
+}
+
 export function findPlan(blueprint: ExecutionBlueprint, planId: string): BlueprintPlan {
+  assertBlueprintFresh(blueprint);
   const plan = blueprint.plans.find((entry) => entry.id === planId);
   if (!plan) throw new Error(`Blueprint does not contain ${planId}.`);
   return plan;
