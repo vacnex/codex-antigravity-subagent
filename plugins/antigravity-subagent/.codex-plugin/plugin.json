@@ -1,7 +1,7 @@
 {
   "name": "antigravity-subagent",
-  "version": "0.4.4",
-  "description": "Delegate bounded tasks to persistent Antigravity workers and execute approved multi-step plans under Codex supervision.",
+  "version": "0.5.0",
+  "description": "Plan with Codex, execute bounded PLAN tasks with Antigravity, and avoid repeated long handoff output through server-side blueprint capture and prompt construction.",
   "author": {
     "name": "IlleJiViN"
   },
@@ -13,28 +13,30 @@
     "agy",
     "mcp",
     "subagent",
-    "delegation"
+    "delegation",
+    "execution-blueprint"
   ],
   "skills": "./skills/",
   "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Antigravity Subagent",
-    "shortDescription": "Persistent Antigravity workers with Codex-supervised plan execution.",
-    "longDescription": "Adds bounded delegation plus supervised execution of approved PLAN-XX blueprints using persistent, resumable Google Antigravity CLI workers with recovery, status, cancellation, and audit metadata.",
+    "shortDescription": "Codex-planned, AGY-executed workflows with deep Codex review.",
+    "longDescription": "Adds canonical execution blueprints, server-side PLAN capture/prompt construction, persistent resumable Antigravity workers, deterministic scope/validation evidence, correction routing, recovery, and Codex semantic review while avoiding repeated large PLAN output from Codex.",
     "developerName": "IlleJiViN",
     "websiteURL": "https://github.com/vacnex/codex-antigravity-subagent",
     "category": "Developer Tools",
     "capabilities": [
       "MCP Tools",
       "Local CLI",
+      "Planning",
       "Delegation",
       "Code Review"
     ],
     "defaultPrompt": [
-      "Use Antigravity as a subagent to review this approach.",
-      "Delegate this bounded research task to Antigravity.",
-      "Ask Antigravity for a second opinion on this bug.",
-      "Execute the approved READY blueprint with Antigravity workers and Codex review."
+      "Create an implementation-ready execution blueprint for this repository.",
+      "Execute the approved READY blueprint with Antigravity workers and Codex review.",
+      "Use Antigravity as a bounded worker for this standalone task.",
+      "Ask Antigravity for a second opinion and verify it independently."
     ]
   }
 }
