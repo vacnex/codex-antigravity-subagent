@@ -1,0 +1,4 @@
+interface:
+  display_name: "Execution Blueprint"
+  short_description: "Plan repository changes into canonical PLAN tasks"
+  default_prompt: "Use $execution-blueprint to inspect this repository and produce an implementation-ready canonical blueprint before coding."
