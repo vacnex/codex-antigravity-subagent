@@ -26,6 +26,8 @@ Before implementation:
 
 The first `agy_start_plan` call captures the latest canonical READY blueprint from the current Codex thread through MCP `threadId` metadata and persists it under local plugin state. **Do not copy the blueprint into a tool argument as a fallback.** If capture is unavailable or malformed, stop and report that concrete capture problem.
 
+A blueprint that records a concrete `Git HEAD` is valid only while that checkout remains on the same HEAD. PLAN resolution performs a deterministic freshness check before PLAN-bound execution/review/correction. If an MCP error contains `BLUEPRINT_STALE` or `BLUEPRINT_FRESHNESS_UNAVAILABLE`, stop the existing execution path and return to `$execution-blueprint`; do not bypass the check, reuse the stale PLAN, or ask AGY to reconcile repository drift. A blueprint whose basis explicitly records `Git HEAD: unavailable` skips this freshness gate.
+
 ## 2. Responsibility boundary
 
 ### Codex owns
