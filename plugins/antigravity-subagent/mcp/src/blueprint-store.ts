@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
-import { parseBlueprint, type ExecutionBlueprint } from './blueprint.js';
+import { assertBlueprintFresh, parseBlueprint, type ExecutionBlueprint } from './blueprint.js';
 import { resolveBlueprintStateDir } from './state-paths.js';
 
 export type BlueprintMetadata = {
@@ -67,6 +67,7 @@ export class BlueprintStore {
 
   async save(canonicalText: string, threadId: string): Promise<StoredBlueprint> {
     const blueprint = parseBlueprint(canonicalText);
+    assertBlueprintFresh(blueprint);
     const blueprintId = blueprintIdFor(blueprint);
     const metadata: BlueprintMetadata = {
       schemaVersion: 1,
@@ -90,6 +91,7 @@ export class BlueprintStore {
       readFile(this.metadataPath(blueprintId), 'utf8'),
     ]);
     const blueprint = parseBlueprint(markdown);
+    assertBlueprintFresh(blueprint);
     if (blueprintIdFor(blueprint) !== blueprintId) {
       throw new Error(`Blueprint content hash no longer matches ${blueprintId}.`);
     }
