@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.5.0 - 2026-09-07
+
+- Bundle `$execution-blueprint` into the plugin and define the canonical `AGY_BLUEPRINT:v1` format, including stable PLAN IDs, write/forbidden scopes, controlled read sets, repository conventions, validation, and stop conditions.
+- Keep the complete canonical blueprint visible in Codex chat exactly once; later execution captures that already-rendered assistant output from the local Codex rollout using MCP `threadId` metadata instead of making Codex regenerate the blueprint into tool arguments.
+- Add persistent blueprint storage under `$CODEX_HOME/antigravity-subagent/blueprints` and execution-run state under `$CODEX_HOME/antigravity-subagent/runs`.
+- Add high-level `agy_start_plan`, whose schema intentionally has no `prompt` field. The MCP server extracts the requested PLAN, injects static AGY execution policy, materializes bounded approved source context, and builds the long Antigravity prompt with ordinary TypeScript rather than Codex output tokens.
+- Add `agy_review_plan` to prepare deterministic supervisor evidence: per-PLAN baseline deltas, write/forbidden-scope violations, pre-existing outside-scope preservation checks, canonical validation results, and a bounded relevant diff. Codex remains responsible for deep semantic review and PASS/FAIL/BLOCKED judgment.
+- Extend `agy_followup` with structured PLAN findings. For PLAN-bound workers the MCP server reconstructs the original PLAN and correction policy server-side so Codex sends only review findings instead of repeating the full execution contract.
+- Materialize target/reference files selected by Codex planning into AGY input with per-file and aggregate bounds. AGY is instructed not to perform broad repository discovery or invent material architecture/API/database/naming decisions.
+- Add temporary bounded baseline snapshots for approved PLAN write scopes; delete those snapshots after every worker in an execution run is closed while retaining blueprint/run/worker audit metadata.
+- Remove `agy_delegate` and `agy_result` from the MCP surface. Standalone bounded work uses `agy_start` + `agy_wait`; lifecycle snapshots use `agy_status`. The v0.5 MCP surface remains nine tools after adding the two PLAN-specific tools.
+- Keep `agy_wait` as the long passive completion barrier (`900s` default, `1100s` max) for v0.5; native MCP Tasks/subscriptions are deferred until Codex host support is verified end-to-end.
+- Add architecture regression coverage that prevents `agy_start_plan` from regaining a large `prompt` argument and checks the v0.5 skill/tool contract.
+- Align plugin/MCP release identity on version `0.5.0` and derive the running MCP server version from package metadata instead of maintaining another hard-coded constant.
+
 ## 0.4.2 - 2026-09-04
 
 - Add read-only `agy_wait` as a passive completion barrier that waits inside the MCP server without sending prompts or owning/canceling the worker. A wait timeout/cancel returns control while the AGY worker continues running.
