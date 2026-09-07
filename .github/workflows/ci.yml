@@ -24,15 +24,24 @@ jobs:
           cache-dependency-path: plugins/antigravity-subagent/mcp/package-lock.json
       - name: Install dependencies
         working-directory: plugins/antigravity-subagent/mcp
-        run: npm ci
+        shell: bash
+        run: |
+          set -o pipefail
+          npm ci 2>&1 | tee -a "$GITHUB_WORKSPACE/ci-diagnostics-node-${{ matrix.node-version }}.log"
       - name: Type-check
         working-directory: plugins/antigravity-subagent/mcp
-        run: npm run check
+        shell: bash
+        run: |
+          set -o pipefail
+          npm run check 2>&1 | tee -a "$GITHUB_WORKSPACE/ci-diagnostics-node-${{ matrix.node-version }}.log"
       - name: Build bundled server
         working-directory: plugins/antigravity-subagent/mcp
-        run: npm run build
+        shell: bash
+        run: |
+          set -o pipefail
+          npm run build 2>&1 | tee -a "$GITHUB_WORKSPACE/ci-diagnostics-node-${{ matrix.node-version }}.log"
       - name: Upload generated MCP bundle
-        if: matrix.node-version == 20
+        if: matrix.node-version == 20 && success()
         uses: actions/upload-artifact@v4
         with:
           name: agy-mcp-dist
@@ -40,6 +49,19 @@ jobs:
           if-no-files-found: error
       - name: Test MCP protocol
         working-directory: plugins/antigravity-subagent/mcp
-        run: npm run test:protocol
+        shell: bash
+        run: |
+          set -o pipefail
+          npm run test:protocol 2>&1 | tee -a "$GITHUB_WORKSPACE/ci-diagnostics-node-${{ matrix.node-version }}.log"
       - name: Verify generated bundle is current
-        run: git diff --exit-code -- plugins/antigravity-subagent/mcp/dist/server.cjs
+        shell: bash
+        run: |
+          set -o pipefail
+          git diff --exit-code -- plugins/antigravity-subagent/mcp/dist/server.cjs 2>&1 | tee -a "$GITHUB_WORKSPACE/ci-diagnostics-node-${{ matrix.node-version }}.log"
+      - name: Upload CI diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-diagnostics-node-${{ matrix.node-version }}
+          path: ci-diagnostics-node-${{ matrix.node-version }}.log
+          if-no-files-found: ignore
