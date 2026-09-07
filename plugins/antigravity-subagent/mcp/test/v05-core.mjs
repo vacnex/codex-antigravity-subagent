@@ -62,6 +62,21 @@ try {
   assert.deepEqual(parsed.plans[0].forbiddenScope, ['forbidden.txt']);
   assert.equal(parsed.plans[0].requiredReadSet[0].path, 'src/reference.txt');
   assert.equal(blueprintModule.extractValidationCommand(parsed.plans[0].canonicalValidation), 'git status --short');
+  assert.equal(blueprintModule.findPlan(parsed, 'PLAN-01').id, 'PLAN-01');
+
+  const noHeadCanonical = canonical.replace(`- Git HEAD: ${head}`, '- Git HEAD: unavailable');
+  const parsedWithoutHead = blueprintModule.parseBlueprint(noHeadCanonical);
+  assert.equal(parsedWithoutHead.gitHead, undefined);
+  assert.equal(blueprintModule.findPlan(parsedWithoutHead, 'PLAN-01').id, 'PLAN-01');
+
+  const nonGitWorkspace = path.join(tempRoot, 'not-a-git-repository');
+  await mkdir(nonGitWorkspace, { recursive: true });
+  const nonGitCanonical = canonical.replace(`- Workspace: ${workspace}`, `- Workspace: ${nonGitWorkspace}`);
+  const nonGitBlueprint = blueprintModule.parseBlueprint(nonGitCanonical);
+  assert.throws(
+    () => blueprintModule.findPlan(nonGitBlueprint, 'PLAN-01'),
+    /BLUEPRINT_FRESHNESS_UNAVAILABLE/,
+  );
 
   const threadId = '11111111-2222-4333-8444-555555555555';
   const codexHome = path.join(tempRoot, 'codex-home');
@@ -148,6 +163,19 @@ try {
   assert.doesNotMatch(persistedRunText, /REFERENCE_PATTERN/);
   assert.doesNotMatch(persistedRunText, /AGY EXECUTION POLICY/);
   assert.doesNotMatch(persistedRunText, /worker overwrote user edit/);
+
+  // Advance the repository HEAD after planning. A plan carrying the old HEAD must now be rejected.
+  git(workspace, 'add', '-A');
+  git(workspace, 'commit', '-m', 'advance HEAD after planning');
+  const advancedHead = git(workspace, 'rev-parse', 'HEAD').trim();
+  assert.notEqual(advancedHead, head);
+  assert.throws(
+    () => blueprintModule.findPlan(reread.blueprint, 'PLAN-01'),
+    /BLUEPRINT_STALE/,
+  );
+
+  // A blueprint that explicitly could not record Git HEAD keeps the previous permissive behavior.
+  assert.equal(blueprintModule.findPlan(parsedWithoutHead, 'PLAN-01').id, 'PLAN-01');
 
   console.error('v0.5 core functional regression test passed');
 } finally {
