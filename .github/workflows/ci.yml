@@ -24,24 +24,15 @@ jobs:
           cache-dependency-path: plugins/antigravity-subagent/mcp/package-lock.json
       - name: Install dependencies
         working-directory: plugins/antigravity-subagent/mcp
-        shell: bash
-        run: |
-          set -o pipefail
-          npm ci 2>&1 | tee -a "$GITHUB_WORKSPACE/ci-diagnostics-node-${{ matrix.node-version }}.log"
+        run: npm ci
       - name: Type-check
         working-directory: plugins/antigravity-subagent/mcp
-        shell: bash
-        run: |
-          set -o pipefail
-          npm run check 2>&1 | tee -a "$GITHUB_WORKSPACE/ci-diagnostics-node-${{ matrix.node-version }}.log"
+        run: npm run check
       - name: Build bundled server
         working-directory: plugins/antigravity-subagent/mcp
-        shell: bash
-        run: |
-          set -o pipefail
-          npm run build 2>&1 | tee -a "$GITHUB_WORKSPACE/ci-diagnostics-node-${{ matrix.node-version }}.log"
+        run: npm run build
       - name: Upload generated MCP bundle
-        if: matrix.node-version == 20 && success()
+        if: matrix.node-version == 20
         uses: actions/upload-artifact@v4
         with:
           name: agy-mcp-dist
@@ -49,19 +40,6 @@ jobs:
           if-no-files-found: error
       - name: Test MCP protocol
         working-directory: plugins/antigravity-subagent/mcp
-        shell: bash
-        run: |
-          set -o pipefail
-          npm run test:protocol 2>&1 | tee -a "$GITHUB_WORKSPACE/ci-diagnostics-node-${{ matrix.node-version }}.log"
+        run: npm run test:protocol
       - name: Verify generated bundle is current
-        shell: bash
-        run: |
-          set -o pipefail
-          git diff --exit-code -- plugins/antigravity-subagent/mcp/dist/server.cjs 2>&1 | tee -a "$GITHUB_WORKSPACE/ci-diagnostics-node-${{ matrix.node-version }}.log"
-      - name: Upload CI diagnostics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ci-diagnostics-node-${{ matrix.node-version }}
-          path: ci-diagnostics-node-${{ matrix.node-version }}.log
-          if-no-files-found: ignore
+        run: git diff --exit-code -- plugins/antigravity-subagent/mcp/dist/server.cjs
