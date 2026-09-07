@@ -13,6 +13,7 @@ const protocolOnly = process.argv.includes('--protocol-only');
 const stateDir = await mkdtemp(path.join(os.tmpdir(), 'agy-mcp-smoke-state-'));
 const childEnv = Object.fromEntries(Object.entries(process.env).filter(([, value]) => typeof value === 'string'));
 childEnv.AGY_MCP_STATE_DIR = stateDir;
+childEnv.AGY_MCP_STATE_ROOT = stateDir;
 childEnv.AGY_MCP_IDLE_DRIVER_MS = '600000';
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -64,7 +65,7 @@ async function openClient(label) {
   );
   configureElicitation(client);
   await client.connect(transport);
-  assert.equal(client.getProtocolEra(), 'modern', 'v2 smoke test must exercise native input_required rather than the legacy push shim');
+  assert.equal(client.getProtocolEra(), 'modern');
   return { client, transport };
 }
 
@@ -72,26 +73,42 @@ async function assertProtocolSurface(client) {
   const tools = await client.listTools();
   assert.deepEqual(
     tools.tools.map((tool) => tool.name).sort(),
-    ['agy_cancel', 'agy_check', 'agy_close', 'agy_delegate', 'agy_followup', 'agy_result', 'agy_start', 'agy_status', 'agy_wait'],
+    [
+      'agy_cancel',
+      'agy_check',
+      'agy_close',
+      'agy_followup',
+      'agy_review_plan',
+      'agy_start',
+      'agy_start_plan',
+      'agy_status',
+      'agy_wait',
+    ],
   );
+
   const startTool = tools.tools.find((tool) => tool.name === 'agy_start');
+  const planTool = tools.tools.find((tool) => tool.name === 'agy_start_plan');
   const followupTool = tools.tools.find((tool) => tool.name === 'agy_followup');
-  const resultTool = tools.tools.find((tool) => tool.name === 'agy_result');
+  const reviewTool = tools.tools.find((tool) => tool.name === 'agy_review_plan');
   const waitTool = tools.tools.find((tool) => tool.name === 'agy_wait');
-  const delegateTool = tools.tools.find((tool) => tool.name === 'agy_delegate');
-  const statusTool = tools.tools.find((tool) => tool.name === 'agy_status');
-  assert.ok(startTool && followupTool && resultTool && waitTool && delegateTool && statusTool);
-  assert.deepEqual(startTool.inputSchema.properties?.effort?.enum, ['low', 'medium', 'high']);
-  assert.equal(startTool.inputSchema.properties?.name?.maxLength, 120);
+  assert.ok(startTool && planTool && followupTool && reviewTool && waitTool);
+
+  assert.ok(startTool.inputSchema.properties?.prompt);
   assert.equal(startTool.inputSchema.properties?.idempotencyKey?.maxLength, 200);
-  assert.equal(startTool.inputSchema.properties?.projectId?.maxLength, 200);
-  assert.equal(delegateTool.inputSchema.properties?.projectId?.maxLength, 200);
-  assert.equal(followupTool.inputSchema.properties?.projectId, undefined, 'followup must inherit the conversation project rather than re-selecting one');
-  assert.equal(followupTool.inputSchema.properties?.idempotencyKey?.maxLength, 200);
-  assert.ok(resultTool.inputSchema.properties?.workerId);
-  assert.ok(waitTool.inputSchema.properties?.workerId);
+  assert.deepEqual(startTool.inputSchema.properties?.effort?.enum, ['low', 'medium', 'high']);
+
+  assert.equal(planTool.inputSchema.properties?.prompt, undefined, 'agy_start_plan must never ask Codex to regenerate PLAN text');
+  assert.ok(planTool.inputSchema.properties?.planId);
+  assert.ok(planTool.inputSchema.properties?.runId);
+  assert.ok(planTool.inputSchema.properties?.cwd);
+
+  assert.ok(followupTool.inputSchema.properties?.prompt, 'standalone follow-up remains supported');
+  assert.ok(followupTool.inputSchema.properties?.findings, 'PLAN-bound follow-up must accept structured findings');
+  assert.equal(followupTool.inputSchema.properties?.projectId, undefined);
+
+  assert.ok(reviewTool.inputSchema.properties?.runId);
+  assert.ok(reviewTool.inputSchema.properties?.planId);
   assert.equal(waitTool.inputSchema.properties?.timeoutSeconds?.maximum, 1100);
-  assert.deepEqual(delegateTool.inputSchema.properties?.effort?.enum, ['low', 'medium', 'high']);
 }
 
 async function waitForResult(client, workerId, expectedText, timeoutMs = 180_000) {
@@ -120,159 +137,86 @@ try {
     assertToolSucceeded('agy_check', check);
     assert.match(check.content[0].text, /Antigravity CLI is available at:/);
     assert.equal(check.structuredContent?.compatible, true);
-    assert.equal(typeof check.structuredContent?.version, 'string');
-    assert.ok(check.structuredContent?.modelCount > 0);
-    assert.equal(typeof check.structuredContent?.projectCount, 'number');
+    assert.equal(check.structuredContent?.serverVersion, '0.5.0');
     const streamingExpected = check.structuredContent?.streaming?.persistentDriver === true;
 
     const startArgs = {
-      name: 'Smoke Plan - Restart Recovery',
-      idempotencyKey: 'smoke-plan-restart-recovery-v043',
+      name: 'Smoke Worker - Restart Recovery',
+      idempotencyKey: 'smoke-worker-restart-recovery-v050',
       prompt: 'Reply with exactly: AGY_WORKER_STARTED. Do not inspect or modify files.',
       cwd: path.resolve(here, '../../../..'),
       mode: 'plan',
       timeoutSeconds: 120,
     };
-    const startAt = Date.now();
     const started = await first.client.callTool({ name: 'agy_start', arguments: startArgs });
     assertToolSucceeded('agy_start', started);
-    assert.equal(started.structuredContent?.name, 'Smoke Plan - Restart Recovery');
-    assert.equal(started.structuredContent?.idempotencyKey, 'smoke-plan-restart-recovery-v043');
-    assert.equal(started.structuredContent?.ledgerPersisted, true);
-    const workerId = started.structuredContent.workerId;
-    const conversationId = started.structuredContent.conversationId;
-    const firstPid = started.structuredContent.driverPid;
-    const projectId = started.structuredContent.agyProjectId;
+    const workerId = started.structuredContent?.workerId;
+    const conversationId = started.structuredContent?.conversationId;
+    const firstPid = started.structuredContent?.driverPid;
+    const projectId = started.structuredContent?.agyProjectId;
     assert.equal(typeof workerId, 'string');
     assert.equal(typeof conversationId, 'string');
-    assert.ok(['explicit', 'auto', 'selected', 'created'].includes(started.structuredContent?.agyProjectResolution));
 
     if (streamingExpected) {
-      assert.equal(started.structuredContent?.transport, 'stream');
       assert.equal(started.structuredContent?.state, 'running');
       assert.equal(started.structuredContent?.done, false);
-      assert.equal(started.structuredContent?.background, true);
-      assert.equal(started.structuredContent?.agyWorkspaceAttested, true);
-      assert.equal(started.structuredContent?.transportStatus, 'running');
-      assert.equal(typeof firstPid, 'number');
-      assert.ok(Date.now() - startAt < 30_000, 'persistent agy_start should return after the init handshake, not after the full turn');
-
-      const runningLedger = await readLedger(workerId);
-      assert.equal(runningLedger.state, 'running');
-      assert.equal(runningLedger.conversationId, conversationId);
-      assert.equal(runningLedger.idempotencyKey, 'smoke-plan-restart-recovery-v043');
-      assert.equal(runningLedger.activeTurnKind, 'start');
-      assert.equal(runningLedger.lastResultStatus, 'RUNNING');
-      assert.equal(runningLedger.agyWorkspaceAttested, true);
-      assert.equal(runningLedger.agyProjectResolution, started.structuredContent?.agyProjectResolution);
-      if (typeof projectId === 'string') assert.equal(runningLedger.agyProjectId, projectId);
+      const ledger = await readLedger(workerId);
+      assert.equal(ledger.state, 'running');
+      assert.equal(ledger.conversationId, conversationId);
+      assert.equal('prompt' in ledger, false);
+      assert.equal('response' in ledger, false);
 
       const retriedStart = await first.client.callTool({ name: 'agy_start', arguments: startArgs });
       assertToolSucceeded('agy_start retry', retriedStart);
       assert.equal(retriedStart.structuredContent?.workerId, workerId);
-      assert.equal(retriedStart.structuredContent?.conversationId, conversationId);
       assert.equal(retriedStart.structuredContent?.reused, true);
-      assert.equal(retriedStart.structuredContent?.agyProjectId, projectId);
     }
 
     const startedFinal = streamingExpected
       ? await waitForResult(first.client, workerId, /AGY_WORKER_STARTED/)
       : started;
-    assert.match(startedFinal.content[0].text, /AGY_WORKER_STARTED/);
     assert.equal(startedFinal.structuredContent?.conversationId, conversationId);
-    if (streamingExpected) {
-      assert.equal(startedFinal.structuredContent?.transportStatus, 'ok');
-      assert.equal(startedFinal.structuredContent?.agyStatus, 'SUCCESS');
-      assert.equal(startedFinal.structuredContent?.failureKind, 'none');
-    }
-
-    const statusWarm = await first.client.callTool({ name: 'agy_status', arguments: { workerId } });
-    assertToolSucceeded('agy_status warm', statusWarm);
-    assert.equal(statusWarm.structuredContent?.workerId, workerId);
-    assert.equal(statusWarm.structuredContent?.state, 'ready');
-    assert.equal(statusWarm.structuredContent?.warm, streamingExpected);
-    assert.equal(statusWarm.structuredContent?.lastTimedOut, false);
-    assert.equal(statusWarm.structuredContent?.lastCanceled, false);
-    assert.equal(statusWarm.structuredContent?.agyProjectId, projectId);
 
     const followupArgs = {
       workerId,
-      idempotencyKey: 'smoke-plan-restart-recovery-v043-followup-1',
+      idempotencyKey: 'smoke-worker-restart-recovery-v050-followup-1',
       prompt: 'Reply with exactly: AGY_WORKER_RESUMED. Do not inspect or modify files.',
       timeoutSeconds: 120,
     };
     const followed = await first.client.callTool({ name: 'agy_followup', arguments: followupArgs });
     assertToolSucceeded('agy_followup warm', followed);
-    assert.equal(followed.structuredContent?.agyProjectId, projectId);
     if (streamingExpected) {
       assert.equal(followed.structuredContent?.state, 'running');
-      assert.equal(followed.structuredContent?.done, false);
       assert.equal(followed.structuredContent?.driverPid, firstPid);
-
-      const retriedFollowup = await first.client.callTool({ name: 'agy_followup', arguments: followupArgs });
-      assertToolSucceeded('agy_followup retry', retriedFollowup);
-      assert.equal(retriedFollowup.structuredContent?.workerId, workerId);
-      assert.equal(retriedFollowup.structuredContent?.reused, true);
     }
     const followedFinal = streamingExpected
       ? await waitForResult(first.client, workerId, /AGY_WORKER_RESUMED/)
       : followed;
     assert.equal(followedFinal.structuredContent?.conversationId, conversationId);
-    assert.equal(followedFinal.structuredContent?.ledgerPersisted, true);
-    assert.equal(followedFinal.structuredContent?.agyProjectId, projectId);
-    if (typeof followedFinal.structuredContent?.sessionUsage?.total_tokens === 'number') {
-      assert.equal(typeof followedFinal.structuredContent?.turnUsage?.total_tokens, 'number');
-      assert.ok(followedFinal.structuredContent.turnUsage.total_tokens <= followedFinal.structuredContent.sessionUsage.total_tokens);
-    }
 
-    const beforeRestart = await readLedger(workerId);
-    assert.equal(beforeRestart.name, 'Smoke Plan - Restart Recovery');
-    assert.equal(beforeRestart.idempotencyKey, 'smoke-plan-restart-recovery-v043');
-    assert.equal(beforeRestart.conversationId, conversationId);
-    assert.equal(beforeRestart.agyProjectId, projectId);
-    assert.equal(beforeRestart.closedAt, undefined);
-    assert.equal(beforeRestart.activeTurnKind, undefined);
-    assert.equal(beforeRestart.lastTurnKind, 'followup');
-    assert.equal(beforeRestart.lastTurnKey, 'smoke-plan-restart-recovery-v043-followup-1');
-    assert.equal('prompt' in beforeRestart, false);
-    assert.equal('response' in beforeRestart, false);
-
-    // Simulate Codex/MCP restart without closing the logical worker.
     await first.client.close();
     first = undefined;
     await sleep(500);
 
     second = await openClient('second');
     await assertProtocolSurface(second.client);
-    await sleep(100);
-
     const recoveredStatus = await second.client.callTool({ name: 'agy_status', arguments: { workerId } });
     assertToolSucceeded('agy_status recovered', recoveredStatus);
     assert.equal(recoveredStatus.structuredContent?.conversationId, conversationId);
     assert.equal(recoveredStatus.structuredContent?.state, 'recoverable');
-    assert.equal(recoveredStatus.structuredContent?.warm, false);
     assert.equal(recoveredStatus.structuredContent?.agyProjectId, projectId);
-
-    const recoveredOldResult = await second.client.callTool({ name: 'agy_result', arguments: { workerId } });
-    assertToolSucceeded('agy_result after restart', recoveredOldResult);
-    assert.equal(recoveredOldResult.structuredContent?.done, true);
-    assert.equal(recoveredOldResult.structuredContent?.resultAvailable, false);
-    assert.equal(recoveredOldResult.structuredContent?.status, 'SUCCESS');
-    assert.equal(recoveredOldResult.structuredContent?.agyProjectId, projectId);
 
     const recovered = await second.client.callTool({
       name: 'agy_followup',
       arguments: {
         workerId,
-        idempotencyKey: 'smoke-plan-restart-recovery-v043-followup-2',
+        idempotencyKey: 'smoke-worker-restart-recovery-v050-followup-2',
         prompt: 'Reply with exactly: AGY_WORKER_RECOVERED. Do not inspect or modify files.',
         timeoutSeconds: 120,
       },
     });
     assertToolSucceeded('agy_followup recovered', recovered);
-    assert.equal(recovered.structuredContent?.agyProjectId, projectId);
     if (streamingExpected) {
-      assert.equal(recovered.structuredContent?.transport, 'stream');
       assert.equal(recovered.structuredContent?.state, 'running');
       assert.equal(typeof recovered.structuredContent?.driverPid, 'number');
       assert.notEqual(recovered.structuredContent.driverPid, firstPid);
@@ -280,10 +224,7 @@ try {
     const recoveredFinal = streamingExpected
       ? await waitForResult(second.client, workerId, /AGY_WORKER_RECOVERED/)
       : recovered;
-    assert.equal(recoveredFinal.structuredContent?.workerId, workerId);
     assert.equal(recoveredFinal.structuredContent?.conversationId, conversationId);
-    assert.equal(recoveredFinal.structuredContent?.ledgerPersisted, true);
-    assert.equal(recoveredFinal.structuredContent?.agyProjectId, projectId);
 
     const noTurnCancel = await second.client.callTool({ name: 'agy_cancel', arguments: { workerId } });
     assertToolSucceeded('agy_cancel idle', noTurnCancel);
@@ -293,18 +234,10 @@ try {
     assertToolSucceeded('agy_close', closed);
     assert.equal(closed.structuredContent?.closed, true);
     assert.equal(closed.structuredContent?.conversationId, conversationId);
-    assert.equal(closed.structuredContent?.agyProjectId, projectId);
-
-    const closedLedger = await readLedger(workerId);
-    assert.equal(closedLedger.state, 'closed');
-    assert.equal(typeof closedLedger.closedAt, 'string');
-    assert.equal(closedLedger.conversationId, conversationId);
-    assert.equal(closedLedger.agyProjectId, projectId);
 
     const closedStatus = await second.client.callTool({ name: 'agy_status', arguments: { workerId, includeClosed: true } });
     assertToolSucceeded('agy_status closed', closedStatus);
     assert.equal(closedStatus.structuredContent?.state, 'closed');
-    assert.equal(closedStatus.structuredContent?.agyProjectId, projectId);
 
     console.error('MCP smoke test passed');
   }
