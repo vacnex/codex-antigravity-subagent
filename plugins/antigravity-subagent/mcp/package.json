@@ -17,7 +17,8 @@
     "test:projects": "node test/projects.mjs && node test/launch-context.mjs && node test/launch-selection.mjs",
     "test:results": "node test/result-semantics.mjs",
     "test:architecture": "node test/architecture.mjs",
-    "test:protocol": "npm run test:streaming && npm run test:cli && npm run test:projects && npm run test:results && npm run test:driver && npm run test:store && npm run test:architecture && node test/smoke.mjs --protocol-only",
+    "test:v05-core": "node test/v05-core.mjs",
+    "test:protocol": "npm run test:streaming && npm run test:cli && npm run test:projects && npm run test:results && npm run test:driver && npm run test:store && npm run test:architecture && npm run test:v05-core && node test/smoke.mjs --protocol-only",
     "verify": "npm run check && npm run build && npm run test:protocol"
   },
   "dependencies": {
