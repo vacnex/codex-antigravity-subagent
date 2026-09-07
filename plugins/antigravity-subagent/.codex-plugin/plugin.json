@@ -1,7 +1,7 @@
 {
   "name": "antigravity-subagent",
   "version": "0.4.4",
-  "description": "Delegate bounded tasks from Codex to persistent, recoverable Google Antigravity CLI workers through a skill or MCP tools.",
+  "description": "Delegate bounded tasks to persistent Antigravity workers and execute approved multi-step plans under Codex supervision.",
   "author": {
     "name": "IlleJiViN"
   },
@@ -19,8 +19,8 @@
   "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Antigravity Subagent",
-    "shortDescription": "Persistent, recoverable Antigravity workers for Codex.",
-    "longDescription": "Adds a guarded skill and local stdio MCP server for persistent, resumable Google Antigravity CLI workers with recovery, status, cancellation, and audit metadata.",
+    "shortDescription": "Persistent Antigravity workers with Codex-supervised plan execution.",
+    "longDescription": "Adds bounded delegation plus supervised execution of approved PLAN-XX blueprints using persistent, resumable Google Antigravity CLI workers with recovery, status, cancellation, and audit metadata.",
     "developerName": "IlleJiViN",
     "websiteURL": "https://github.com/vacnex/codex-antigravity-subagent",
     "category": "Developer Tools",
@@ -33,7 +33,8 @@
     "defaultPrompt": [
       "Use Antigravity as a subagent to review this approach.",
       "Delegate this bounded research task to Antigravity.",
-      "Ask Antigravity for a second opinion on this bug."
+      "Ask Antigravity for a second opinion on this bug.",
+      "Execute the approved READY blueprint with Antigravity workers and Codex review."
     ]
   }
 }
