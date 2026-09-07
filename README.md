@@ -3,7 +3,7 @@
 [![Release](https://img.shields.io/github/v/release/vacnex/codex-antigravity-subagent)](https://github.com/vacnex/codex-antigravity-subagent/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Use your locally authenticated Google Antigravity CLI (`agy`) as an external delegated worker from Codex. Codex can start a bounded Antigravity task, review workspace changes, send corrections into the same conversation, recover that worker after Codex/MCP restarts, and close it only after review passes.
+Use your locally authenticated Google Antigravity CLI (`agy`) as an external delegated worker from Codex. Codex can start a bounded Antigravity task, review workspace changes, send corrections into the same conversation, recover that worker after Codex/MCP restarts, and close it only after the supervising workflow no longer needs corrections.
 
 > [!IMPORTANT]
 > This is an independent community project. It is not affiliated with or endorsed by Google, Antigravity, or OpenAI. This fork is based on the original project by [IlleJiViN](https://github.com/IlleJiViN/codex-antigravity-subagent).
@@ -19,7 +19,8 @@ Use your locally authenticated Google Antigravity CLI (`agy`) as an external del
 - `agy_status` shows active, recoverable, or closed worker metadata without reading stored prompts/responses (because the ledger never stores them).
 - `agy_cancel` stops the active turn while preserving the worker conversation for later recovery.
 - `agy_close` closes the managed worker while retaining local audit metadata and the Antigravity conversation.
-- `$delegate-to-antigravity` teaches Codex how to delegate one plan step per worker, wait, review, correct, recover, cancel, and close safely.
+- `$delegate-to-antigravity` owns one bounded AGY worker's lifecycle, Project/model/effort selection, retry safety, correction turns, recovery, and result semantics.
+- `$execute-plan` coordinates an approved READY `PLAN-XX` blueprint: one fresh worker per PLAN, Codex review/correction loops, final whole-blueprint audit, then worker cleanup.
 
 Managed responses are capped at 64 KiB. Stream step updates are summarized rather than dumped into Codex context. Results expose cumulative `sessionUsage` plus per-turn `turnUsage` deltas.
 
@@ -40,17 +41,19 @@ agy --version
 codex plugin marketplace add vacnex/codex-antigravity-subagent --ref main
 ```
 
-Then open Codex, run `/plugins`, choose **Antigravity Subagent**, and install it. Start a new Codex session afterward so the skill and MCP tools are loaded.
+Then open Codex, run `/plugins`, choose **Antigravity Subagent**, and install it. Start a new Codex session afterward so the skills and MCP tools are loaded.
 
 Because this plugin declares a local MCP server, imported ChatGPT plugins can be labeled **Desktop only**; this local MCP runtime is not intended for ChatGPT web.
 
 ## Managed worker workflow
 
+`delegate-to-antigravity` manages one bounded worker. The caller decides whether a reviewed PASS is final for that worker or whether to keep it open for later integration corrections.
+
 ```text
-Codex plan step
+bounded assignment
    │
    ▼
-agy_start(name="Plan 2 - persistence", idempotencyKey="plan-2")
+agy_start(name="persistence", idempotencyKey="run:persistence")
    │
    ▼
 worker registered as running
@@ -60,25 +63,24 @@ worker registered as running
    └─► agy_wait(worker A)    ─► passive wait until terminal result
                                   │
                                   ▼
-                          Codex reviews diff/tests
+                          Codex/caller reviews
                                   │
-             ┌────────────────────┼────────────────────┐
-             │                    │                    │
-            FAIL                 STOP                 PASS
-             │                    │                    │
-             ▼                    ▼                    ▼
-agy_followup(worker A,       agy_cancel(worker A)  agy_close(worker A)
-idempotencyKey="plan-2-fix-1")                         │
-             │                                          ▼
-             └─► agy_wait ─► review again          next plan step
-                                                     new worker B
+                  ┌───────────────┼───────────────┐
+                  │               │               │
+                 FAIL            STOP            PASS
+                  │               │               │
+                  ▼               ▼               ▼
+        agy_followup(worker A,  agy_cancel     caller decides
+        idempotencyKey="...fix")               keep-open/close
+                  │
+                  └─► agy_wait ─► review again
 ```
 
 A new worker asks the user to choose an Antigravity base model and reasoning effort unless both were supplied explicitly. Effort-suffixed model variants are grouped into base-model choices where possible.
 
 Use a stable `idempotencyKey` for every logical `agy_start` and correction turn. Retrying the same key reuses the existing worker/turn instead of starting duplicate AGY work. If a caller omits a key, recent same-name + same-workspace starts are also reused as a compatibility safety net.
 
-For sequential multi-step execution, `agy_wait` is the normal completion barrier. A worker that is still `RUNNING`, or an `agy_wait` that returns `done=false` because its passive wait interval ended, is not a reason to skip the current plan or return a final status summary. Wait again, then review/fix/close the current worker before starting the next requested plan step.
+For approved sequential multi-step execution, use `$execute-plan`. It uses `agy_wait` as the completion barrier, reviews each PLAN independently, keeps passed PLAN workers available for final integration corrections, and closes them after the whole blueprint passes. A worker that is still `RUNNING`, or an `agy_wait` that returns `done=false` because its passive wait interval ended, is not a reason to skip the current PLAN or return a final status summary.
 
 ### Warm persistent workers
 
@@ -247,7 +249,7 @@ Retry with the **same `idempotencyKey`**. The bridge reuses the existing logical
 
 ### `agy_wait` returns `done=false`
 
-This means only that the passive wait interval ended before the AGY turn finished. The worker was not canceled. For a requested sequential plan, call `agy_wait` again on the same `workerId`; do not start the next plan step and do not treat this as a genuine blocker.
+This means only that the passive wait interval ended before the AGY turn finished. The worker was not canceled. If the caller still requires this worker's result, call `agy_wait` again on the same `workerId`. In `$execute-plan`, do not start the next PLAN and do not treat this as a genuine blocker.
 
 ### `agy_result` has no final response text after restart
 
