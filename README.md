@@ -3,32 +3,244 @@
 [![Release](https://img.shields.io/github/v/release/vacnex/codex-antigravity-subagent)](https://github.com/vacnex/codex-antigravity-subagent/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Use your locally authenticated Google Antigravity CLI (`agy`) as an external delegated worker from Codex. Codex can start a bounded Antigravity task, review workspace changes, send corrections into the same conversation, recover that worker after Codex/MCP restarts, and close it only after the supervising workflow no longer needs corrections.
+Use your locally authenticated Google Antigravity CLI (`agy`) as a bounded implementation worker while Codex remains the planner and semantic reviewer.
 
 > [!IMPORTANT]
 > This is an independent community project. It is not affiliated with or endorsed by Google, Antigravity, or OpenAI. This fork is based on the original project by [IlleJiViN](https://github.com/IlleJiViN/codex-antigravity-subagent).
 
-## What it adds
+## v0.5 architecture
 
-- `agy_check` verifies the Antigravity CLI, model catalog, required headless flags, and persistent `stream-json` support. Short-lived discovery caches can be bypassed with `refresh=true`.
-- `agy_delegate` runs one bounded one-shot Antigravity prompt and honors MCP cancellation.
-- `agy_start` starts a named resumable worker and returns both a bridge `workerId` and Antigravity `conversationId` after the stream handshake while the long first turn continues in the background.
-- `agy_followup` launches a correction turn on the same worker in the background, reusing the same warm AGY process when possible or resuming the exact persisted conversation after restart/process loss.
-- `agy_result` reads an immediate non-blocking current/final snapshot of the latest managed turn without sending another prompt. Final response text is kept only in MCP memory and is never written to the durable ledger.
-- `agy_wait` passively waits inside the MCP server for the latest managed turn to finish, without sending prompts or owning/canceling the AGY worker. A wait timeout/cancel returns control while the worker keeps running.
-- `agy_status` shows active, recoverable, or closed worker metadata without reading stored prompts/responses (because the ledger never stores them).
-- `agy_cancel` stops the active turn while preserving the worker conversation for later recovery.
-- `agy_close` closes the managed worker while retaining local audit metadata and the Antigravity conversation.
-- `$delegate-to-antigravity` owns one bounded AGY worker's lifecycle, Project/model/effort selection, retry safety, correction turns, recovery, and result semantics.
-- `$execute-plan` coordinates an approved READY `PLAN-XX` blueprint: one fresh worker per PLAN, Codex review/correction loops, final whole-blueprint audit, then worker cleanup.
+v0.5 is designed around a simple split of responsibility:
 
-Managed responses are capped at 64 KiB. Stream step updates are summarized rather than dumped into Codex context. Results expose cumulative `sessionUsage` plus per-turn `turnUsage` deltas.
+```text
+CODEX
+planning + repository understanding + deep review
+        │
+        │ small control calls
+        ▼
+MCP
+blueprint capture + prompt construction + baselines + scope/validation mechanics
+        │
+        │ large context
+        ▼
+AGY
+implementation + code output + corrections
+```
+
+The goal is **not** to starve Codex of useful repository input or review reasoning. The goal is to stop using expensive Codex output as a transport layer for text that already exists.
+
+Codex may spend substantial input/reasoning budget reading the repository, identifying conventions, making architecture decisions, and reviewing edge cases. The complete blueprint is generated once. MCP then copies/reconstructs repeated PLAN context with ordinary TypeScript and sends the large implementation context to Antigravity.
+
+## Skills
+
+The plugin bundles three related skills:
+
+- `$execution-blueprint` inspects repository instructions/source/precedents and produces a canonical implementation-ready `AGY_BLUEPRINT:v1` directly in Codex chat.
+- `$execute-plan` supervises an approved READY blueprint: dependency ordering, one fresh worker per PLAN, Codex semantic review/correction loops, final whole-blueprint audit, and cleanup.
+- `$delegate-to-antigravity` manages standalone bounded AGY assignments and the generic worker lifecycle.
+
+### Canonical blueprint
+
+`$execution-blueprint` renders the complete plan once between machine-readable markers:
+
+```text
+<!-- AGY_BLUEPRINT:v1:START -->
+Blueprint status: READY
+Blueprint depth: Standard Blueprint
+
+Blueprint basis:
+- Workspace: D:\src\example
+- Git HEAD: abc123
+
+## Implementation Tasks
+
+### PLAN-01: ...
+...
+<!-- AGY_BLUEPRINT:v1:END -->
+```
+
+The blueprint remains human-readable in chat. It contains bounded write scope, forbidden scope, controlled reference/read context, concrete repository conventions, required behavior, validation, and stop conditions.
+
+On the next user turn, `agy_start_plan` receives Codex's MCP `threadId` metadata, reads the local Codex rollout under `$CODEX_HOME`, extracts the latest complete canonical blueprint, and persists it. Codex does **not** send the full blueprint through a tool argument again.
+
+> [!NOTE]
+> Canonical transcript capture is intentionally a local Codex integration. It depends on Codex providing `threadId` MCP metadata and retaining the local rollout. If capture cannot be performed safely, execution fails clearly instead of asking Codex to regenerate the full blueprint into a tool call.
+
+## MCP tools
+
+v0.5 exposes nine tools:
+
+| Tool | Purpose |
+| --- | --- |
+| `agy_check` | Verify AGY installation/capabilities and report MCP version |
+| `agy_start` | Start one standalone bounded managed worker from a prompt |
+| `agy_start_plan` | Start one approved PLAN without a PLAN/prompt argument |
+| `agy_followup` | Continue a worker; PLAN workers can receive structured findings only |
+| `agy_wait` | Long passive completion barrier inside MCP |
+| `agy_review_plan` | Prepare deterministic PLAN review evidence and validation |
+| `agy_status` | Inspect active/recoverable/closed worker state |
+| `agy_cancel` | Interrupt an active worker turn |
+| `agy_close` | Close a logical worker and retain audit metadata |
+
+The v0.4 `agy_delegate` and `agy_result` surfaces are removed. Standalone bounded work uses `agy_start` + `agy_wait`; lifecycle snapshots use `agy_status`.
+
+## Token-efficient PLAN execution
+
+The first PLAN call is deliberately small:
+
+```text
+agy_start_plan({
+  planId: "PLAN-01",
+  cwd: "D:\\src\\example"
+})
+```
+
+There is **no `prompt` field** in `agy_start_plan`.
+
+MCP performs the expensive-looking but token-free deterministic work itself:
+
+```text
+threadId
+  ↓
+read Codex rollout
+  ↓
+capture canonical blueprint
+  ↓
+persist + parse PLAN
+  ↓
+capture write-scope baseline
+  ↓
+read approved source/reference files
+  ↓
+append static AGY execution policy
+  ↓
+build long prompt with TypeScript
+  ↓
+AGY input
+```
+
+Later tasks reuse the run:
+
+```text
+agy_start_plan({
+  runId: "run_...",
+  planId: "PLAN-02"
+})
+```
+
+The run pins its workspace, canonical blueprint, Project/model/effort selections, baseline metadata, and worker-to-PLAN mapping.
+
+## Controlled AGY context
+
+Codex remains responsible for understanding the repository during planning. A PLAN should identify the exact target files and proven reference/precedent files AGY needs.
+
+MCP materializes bounded textual content from the PLAN's write targets and required read set into the AGY prompt. Large/binary/unavailable files are passed as exact references rather than blindly copied.
+
+AGY is instructed to:
+
+- implement the approved PLAN, not redesign it;
+- modify only the approved write scope;
+- never write forbidden scope;
+- start from supplied source/reference context;
+- avoid repository-wide discovery and parent-drive searches;
+- read an additional file only when it is a direct dependency needed for a concrete approved implementation;
+- stop as BLOCKED rather than inventing architecture, public contracts, DTO/schema decisions, naming conventions, or cross-module abstractions.
+
+This read policy is a semantic boundary, not a claim that AGY is filesystem-sandboxed to those paths. The write boundary is independently checked after the turn.
+
+## Deterministic review + deep Codex review
+
+After AGY completes a PLAN:
+
+```text
+agy_wait(workerId)
+        ↓
+agy_review_plan({ runId, planId })
+        ↓
+Codex deep semantic review
+```
+
+`agy_review_plan` prepares mechanical evidence from the per-PLAN baseline:
+
+- actual owned-path delta;
+- changed files;
+- newly modified files outside approved write scope;
+- forbidden-scope changes;
+- detected modification of pre-existing outside-scope user changes;
+- canonical validation result/output when the PLAN declares an executable command;
+- bounded relevant diff with explicit truncation/incomplete flags.
+
+MCP does **not** decide semantic correctness. Codex should still inspect the code deeply for naming/style conventions, invented abstractions, edge cases, public contract regressions, error/null/loading behavior, and blueprint compliance. If MCP truncates a diff, Codex should inspect the affected files directly rather than reducing review quality.
+
+## Correction flow
+
+When Codex finds a problem, it sends findings instead of repeating the PLAN:
+
+```text
+agy_followup({
+  workerId: "agy_...",
+  findings: [
+    {
+      file: "Services/FooService.cs",
+      symbol: "Save",
+      problem: "...",
+      expected: "...",
+      rationale: "..."
+    }
+  ]
+})
+```
+
+MCP maps the worker back to its run/blueprint/PLAN, reconstructs the original execution contract plus static correction policy, appends Codex's findings, and sends that long correction prompt to the existing Antigravity conversation.
+
+Codex can therefore make review findings as detailed as correctness requires without regenerating the original PLAN boilerplate.
+
+## Worker lifecycle
+
+Persistent AGY workers use `stream-json` when supported. Managed starts/follow-ups return after the stream handshake/turn registration while AGY continues in the background.
+
+`agy_wait` remains the v0.5 completion barrier:
+
+```text
+agy_wait(workerId, timeoutSeconds=900)
+```
+
+The waiter polls inside the MCP process, not through repeated Codex model turns. Its maximum interval is 1100 seconds, below the bundled MCP `tool_timeout_sec=1200`. If the passive wait expires, the worker continues and can be awaited again.
+
+Native MCP Tasks/subscription notifications are intentionally deferred until Codex host support is verified end-to-end.
+
+Use stable idempotency keys for standalone starts/corrections. PLAN starts derive stable run/PLAN keys automatically.
+
+Passed PLAN workers remain open and idle until the final whole-blueprint audit so an integration finding can be routed back to the original owning conversation. Close all PLAN workers after `BLUEPRINT_PASS`.
+
+## State and recovery
+
+Worker metadata remains under:
+
+```text
+$CODEX_HOME/antigravity-subagent/workers
+```
+
+v0.5 additionally stores:
+
+```text
+$CODEX_HOME/antigravity-subagent/blueprints
+$CODEX_HOME/antigravity-subagent/runs
+```
+
+Blueprint storage contains the canonical marked blueprint plus bounded metadata. Run storage contains execution identity, PLAN-worker mapping, and temporary per-PLAN baseline state.
+
+To distinguish AGY changes from pre-existing user edits, PLAN execution may temporarily snapshot files inside the approved write scope. Snapshots are size-bounded and local. After every worker in the run is closed, MCP removes temporary baseline source snapshots while retaining bounded blueprint/run/worker audit metadata.
+
+The worker ledger still does not store prompts, responses, source code, or AGY tool output.
+
+After MCP/Codex restart, open AGY workers can become recoverable. The persisted Antigravity `conversationId` is reused for corrections, and the run retains its PLAN mapping/baseline metadata when available.
 
 ## Requirements
 
-- Codex CLI or a supported Codex desktop surface that can run local MCP servers
+- Codex CLI or a supported local Codex desktop surface capable of running local MCP servers
 - Node.js 20 or newer
-- [Google Antigravity CLI](https://antigravity.google/docs/cli-getting-started), installed and authenticated as `agy`
+- Google Antigravity CLI installed and authenticated as `agy`
 
 ```powershell
 node --version
@@ -41,235 +253,63 @@ agy --version
 codex plugin marketplace add vacnex/codex-antigravity-subagent --ref main
 ```
 
-Then open Codex, run `/plugins`, choose **Antigravity Subagent**, and install it. Start a new Codex session afterward so the skills and MCP tools are loaded.
+Then open `/plugins`, install **Antigravity Subagent**, and start a new Codex session so the new skill/tool schemas are loaded.
 
-Because this plugin declares a local MCP server, imported ChatGPT plugins can be labeled **Desktop only**; this local MCP runtime is not intended for ChatGPT web.
-
-## Managed worker workflow
-
-`delegate-to-antigravity` manages one bounded worker. The caller decides whether a reviewed PASS is final for that worker or whether to keep it open for later integration corrections.
-
-```text
-bounded assignment
-   │
-   ▼
-agy_start(name="persistence", idempotencyKey="run:persistence")
-   │
-   ▼
-worker registered as running
-   │
-   ├─► agy_status(worker A)  ─► lifecycle/progress snapshot
-   ├─► agy_result(worker A)  ─► immediate non-blocking snapshot
-   └─► agy_wait(worker A)    ─► passive wait until terminal result
-                                  │
-                                  ▼
-                          Codex/caller reviews
-                                  │
-                  ┌───────────────┼───────────────┐
-                  │               │               │
-                 FAIL            STOP            PASS
-                  │               │               │
-                  ▼               ▼               ▼
-        agy_followup(worker A,  agy_cancel     caller decides
-        idempotencyKey="...fix")               keep-open/close
-                  │
-                  └─► agy_wait ─► review again
-```
-
-A new worker asks the user to choose an Antigravity base model and reasoning effort unless both were supplied explicitly. Effort-suffixed model variants are grouped into base-model choices where possible.
-
-Use a stable `idempotencyKey` for every logical `agy_start` and correction turn. Retrying the same key reuses the existing worker/turn instead of starting duplicate AGY work. If a caller omits a key, recent same-name + same-workspace starts are also reused as a compatibility safety net.
-
-For approved sequential multi-step execution, use `$execute-plan`. It uses `agy_wait` as the completion barrier, reviews each PLAN independently, keeps passed PLAN workers available for final integration corrections, and closes them after the whole blueprint passes. A worker that is still `RUNNING`, or an `agy_wait` that returns `done=false` because its passive wait interval ended, is not a reason to skip the current PLAN or return a final status summary.
-
-### Warm persistent workers
-
-When the installed AGY exposes both `--input-format stream-json` and `--output-format stream-json`, managed workers keep one warm AGY process alive between turns. `agy_start` waits only for the stream `init` event so the bridge can durably register `conversationId` and `state=running`; it then sends the prompt and returns immediately while AGY continues in the background.
-
-```text
-agy_start
-   ↓
-spawn AGY once
-   ↓
-receive init / conversationId
-   ↓
-persist state=running
-   ↓
-return workerId to Codex
-   ↓
-turn 1 continues over stdin
-   ↓
-agy_wait blocks only the passive waiter
-   ↓
-result stored in MCP memory + ledger metadata
-   │
-   ├─ process remains warm
-   │
-agy_followup
-   ↓
-register background correction turn
-   ↓
-turn 2 over same stdin/process
-```
-
-Only one turn may be active on a worker at a time. Older AGY versions automatically fall back to the v0.3 one-shot `--conversation <id>` path; that legacy compatibility path cannot expose a conversation ID before the one-shot command finishes, so it remains blocking.
-
-### Persistent registry and recovery
-
-Worker metadata is stored outside the plugin installation directory:
-
-```text
-$CODEX_HOME/antigravity-subagent/workers
-```
-
-or `~/.codex/antigravity-subagent/workers` when `CODEX_HOME` is not set. Override it with `AGY_MCP_STATE_DIR`.
-
-The ledger stores worker/conversation identity, friendly name, optional idempotency key, workspace, model/effort/mode, timestamps, lifecycle/active-turn metadata, last transport/PID, turn count, timeout/cancel/error flags, and usage metadata. It **does not store prompts, responses, source code, or tool output**.
-
-The persistent-stream start path writes `conversationId`, `state=running`, and active-turn metadata before sending the long prompt. Therefore `agy_status` can identify a worker immediately even if a caller loses the `agy_start` response.
-
-After Codex/MCP restarts, an open worker is loaded as `recoverable`. A persisted `running` turn with no live owner is marked `INTERRUPTED` rather than left as a ghost running task. The next `agy_followup` starts a new AGY process with the exact saved `--conversation <id>`. A cross-process lease prevents two MCP instances from driving the same worker concurrently; stale leases are reclaimed when their owning process is gone or the lease expires.
-
-> [!NOTE]
-> v0.3 managed workers existed only in MCP memory, so workers created before upgrading to v0.4 cannot be reconstructed after a restart. Persistent recovery applies to workers created by v0.4 or later.
-
-Warm AGY processes are released after an idle period while the logical worker remains recoverable. Set `AGY_MCP_IDLE_DRIVER_MS` to tune the idle duration (minimum 10 seconds; default 10 minutes).
-
-Closed worker ledger records are intentionally retained for local audit. The plugin does not currently auto-prune them. If you no longer want that history, remove the corresponding worker JSON records while no MCP server instance is using that state directory. Removing a local ledger record does not delete Antigravity's own conversation history.
-
-## Status, result, wait, and cancellation
-
-```text
-agy_status(workerId)
-agy_status(includeClosed=true)
-agy_result(workerId)
-agy_wait(workerId, timeoutSeconds=900)
-agy_cancel(workerId)
-```
-
-`agy_status` reports lifecycle state, warm/recoverable state, driver PID, lease information, active/last turn keys, timeout/cancel/error state, turn count, compact progress, duplicate-worker metadata, and token usage.
-
-`agy_result` never submits a prompt and never waits. While a turn is active it explicitly reports that the existing worker is still running; after completion it returns the final AGY response when that response is still available in the current MCP process. Final response text is intentionally memory-only. After an MCP restart, `agy_result` can still report durable completion/status/usage/error metadata, but cannot reconstruct the previous response text because the ledger never stores it.
-
-`agy_wait` never submits a prompt. It performs the waiting loop inside the MCP server so Codex does not need repeated model-driven `sleep`/`agy_result` polling. The wait does not own the worker: if the passive wait reaches its timeout, or the MCP client cancels only the wait call, the AGY turn continues in the background and can be awaited again. `waitTimedOut` and `waitCanceled` describe the waiter; they are distinct from the worker's own `lastTimedOut` / `lastCanceled` metadata.
-
-`agy_cancel` targets only the active background turn; it does not delete the worker or Antigravity conversation. For a background turn, cancellation is explicit through `agy_cancel`; the original `agy_start`/`agy_followup` MCP request has already returned by then. Canceling `agy_wait` does not implicitly cancel AGY.
-
-The bundled Codex MCP declaration sets `tool_timeout_sec` to 1200 seconds for compatibility with legacy blocking AGY paths and explicit one-shot delegation. `agy_wait` is capped below that client deadline so it can return a clean continuation state. Persistent managed starts/follow-ups normally return long before the timeout.
-
-## Token and context handling
-
-AGY persistent streams report cumulative usage. The plugin preserves that as `sessionUsage` (and the backward-compatible `usage` field) and computes `turnUsage` from the previous persisted usage snapshot.
-
-Stream `step_update` payloads are parsed for observability but only compact counters are returned to Codex. Text deltas, tool payloads, subagent payloads, full diffs, and source content are not copied into the handoff.
-
-Using `agy_wait` as the completion barrier avoids repeatedly waking the Codex model just to poll a still-running worker. The MCP server performs the small internal status loop while the model remains blocked on one tool call.
-
-CLI path discovery, capability reports, and model catalogs use short-lived caches to avoid repeated `agy --version`, `agy --help`, and `agy models` startup costs. Use `agy_check(refresh=true)` when a forced refresh is needed.
-
-## Auditing delegated sessions
-
-Managed workers preserve the Antigravity `conversation_id`. The friendly worker name is guaranteed in the local ledger; Antigravity may generate its own native conversation title.
-
-From the same workspace:
-
-```text
-agy
-/resume
-```
-
-Or resume a known conversation directly:
-
-```powershell
-agy --conversation <conversation-id>
-```
-
-Do not attach `/resume` to a conversation that the managed bridge is currently driving; Antigravity may interrupt the active session. Use `agy_status`/`agy_result`/`agy_wait` for passive inspection or completion while work is active.
-
-This is an audit trail of persisted worker metadata plus visible Antigravity conversation/tool activity, not hidden chain-of-thought.
-
-## One-shot delegation
-
-Use `agy_delegate` when a task does not need a review/fix loop, for example a second opinion or read-only analysis. The bundled fallback runner remains available when MCP tools are unavailable, but it does not provide the persistent registry, background-turn API, idempotency/dedupe, leases, status/result/wait/cancel tools, or managed recovery runtime.
-
-## Permission and data flow
-
-The plugin starts the official `agy` process on your machine. Prompts, workspace paths, and files Antigravity reads are handled according to your local Antigravity configuration, Google account, sandbox, and permission settings.
-
-The plugin:
-
-- does not collect telemetry or run a remote service;
-- does not expose dangerous permission-bypass flags;
-- does not bypass Antigravity authentication or approval prompts;
-- persists only bounded worker metadata, never prompt/response/file contents;
-- preserves Antigravity conversation IDs for audit and recovery;
-- limits response and diagnostic output returned to Codex.
-
-Do not delegate secrets, credentials, private customer data, deployments, purchases, or destructive operations unless you explicitly intend to send that scope through Antigravity.
-
-## Modes
-
-| Mode | Intended use | Can change files? |
-| --- | --- | --- |
-| `plan` | Reviews, research, diagnosis, proposed changes | No edits intended |
-| `default` | Follow your persisted Antigravity policy | Depends on local policy |
-| `accept-edits` | Explicitly authorized implementation | Yes |
-
-`agy_start` defaults to `accept-edits`. Use `plan` for read-only review or research.
-
-## Update or remove
+To update:
 
 ```powershell
 codex plugin marketplace upgrade antigravity-subagent
 ```
 
-Use `/plugins` to update, disable, or uninstall the plugin. Remove the marketplace with:
+## Typical workflow
 
-```powershell
-codex plugin marketplace remove antigravity-subagent
+```text
+User: "lên kế hoạch"
+        ↓
+$execution-blueprint
+        ↓
+Codex reads repo + conventions
+        ↓
+canonical blueprint printed once
+
+User: "thực thi"
+        ↓
+$execute-plan
+        ↓
+agy_start_plan(PLAN-01)
+        ↓
+MCP captures blueprint + builds AGY prompt
+        ↓
+AGY implements
+        ↓
+agy_wait
+        ↓
+agy_review_plan
+        ↓
+Codex deep review
+   ┌────┴────┐
+ PASS       FAIL
+  │           │
+next PLAN  agy_followup(findings)
+               ↓
+            review again
+
+all PLANs PASS
+        ↓
+Codex whole-blueprint audit
+        ↓
+BLUEPRINT_PASS
+        ↓
+agy_close all PLAN workers
 ```
 
-## Troubleshooting
+## Safety
 
-### `agy_check` reports incompatible capabilities
+The plugin starts the official local `agy` process and respects your Antigravity authentication/sandbox/permission configuration. It does not provide permission-bypass flags or a remote relay.
 
-Update Antigravity CLI and rerun `agy_check(refresh=true)`. Persistent streaming is an optimization; managed workers retain the one-shot conversation-resume fallback when stream input is unavailable.
+Do not delegate credentials, secrets, private customer data, destructive external operations, deployments, purchases, or messages unless that exact scope is intentionally authorized.
 
-### A worker is `recoverable`
-
-This is expected after MCP/Codex restart, cancellation, warm-process loss, idle cleanup, or interruption of a running turn. Send the next correction with `agy_followup(workerId)`; the plugin resumes the exact persisted conversation.
-
-### A worker is leased by another MCP process
-
-Use `agy_status(workerId)` first. Do not work around the lease by manually driving the same conversation from another managed worker. Dead/stale lease owners are reclaimed automatically.
-
-### A start/follow-up response was lost or the caller is unsure whether it launched
-
-Retry with the **same `idempotencyKey`**. The bridge reuses the existing logical worker/turn instead of creating duplicate AGY work. For starts without an explicit key, a recent same-name + same-workspace worker is reused as a compatibility fallback.
-
-### `agy_wait` returns `done=false`
-
-This means only that the passive wait interval ended before the AGY turn finished. The worker was not canceled. If the caller still requires this worker's result, call `agy_wait` again on the same `workerId`. In `$execute-plan`, do not start the next PLAN and do not treat this as a genuine blocker.
-
-### `agy_result` has no final response text after restart
-
-This is expected. Final response text is never persisted. After restart, use `agy_status` / `agy_result` for durable completion/error/usage metadata and inspect the workspace diff/tests directly. Send `agy_followup` only when a new correction is actually needed.
-
-### The model/effort picker cannot be displayed
-
-Pass both `model` and `effort` explicitly in MCP clients that cannot display elicitation forms.
-
-### MCP fails to start when Node is managed by mise/asdf/another version manager
-
-The plugin declaration launches the server with `command: "node"`. Codex may not inherit shell initialization performed by a Node version manager. Verify what your interactive shell resolves:
-
-```powershell
-where.exe node
-node --version
-mise which node
-```
-
-If `node` is available only through shell initialization or a version-manager shim that Codex cannot resolve, make Node directly reachable from the environment used to launch Codex or configure the MCP command to a concrete Node executable path.
+The plugin treats persisted AGY conversation IDs and local run metadata as an audit trail of visible activity, not access to hidden model chain-of-thought.
 
 ## Development
 
@@ -277,15 +317,6 @@ If `node` is available only through shell initialization or a version-manager sh
 cd plugins/antigravity-subagent/mcp
 npm ci
 npm run verify
-npm test
 ```
 
-`npm run verify` performs TypeScript checking, rebuilds `dist/server.cjs`, runs stream parser tests, cancellable CLI tests, persistent-driver tests, worker store/lease tests, and the protocol-only MCP smoke test without using AGY quota.
-
-`npm test` performs a real stdio MCP round trip against the authenticated AGY CLI. It validates background start registration, durable running state, retry dedupe, passive `agy_wait` completion, `agy_result`, warm background follow-up, an actual MCP restart, exact conversation recovery with a new PID, and final close/audit state.
-
-Release builds are validated locally on Windows with an authenticated AGY CLI. GitHub Actions is currently unavailable for this repository/account, so it is not used as the release gate.
-
-The checked-in `dist/server.cjs` is the runtime artifact used by the installed plugin and must be regenerated after source changes.
-
-Security reports and the trust model are documented in [SECURITY.md](SECURITY.md). The [Privacy Policy](PRIVACY.md) and [Terms of Use](TERMS.md) apply to public distribution.
+CI runs Node 20 and Node 24, type-checks, rebuilds the bundled MCP server, runs protocol/architecture regression tests, and verifies that `dist/server.cjs` is current.
