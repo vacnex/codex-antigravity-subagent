@@ -1,0 +1,4 @@
+interface:
+  display_name: "Execute Plan with Antigravity"
+  short_description: "Execute approved PLAN tasks with Codex review"
+  default_prompt: "Use $execute-plan to execute the approved READY blueprint with Antigravity workers and Codex review."
