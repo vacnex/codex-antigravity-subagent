@@ -1,277 +1,269 @@
 ---
 name: execute-plan
 description: >-
-  Execute an approved READY execution blueprint with Google Antigravity CLI (`agy`) in the
-  user's current local checkout. Codex acts as supervisor: it resolves project rules,
-  delegates each PLAN to a fresh bounded worker, independently reviews the workspace delta,
-  sends corrections to the same worker until the PLAN passes, performs a final whole-blueprint
-  audit, and closes workers only after execution is complete.
+  Execute an approved READY AGY_BLUEPRINT:v1 with Google Antigravity CLI workers while Codex remains
+  the repository supervisor and semantic reviewer. Use when the user asks to implement/run an approved
+  blueprint. The MCP server captures the already-rendered blueprint from the Codex thread, builds long
+  worker prompts server-side, enforces mechanical boundaries, and keeps repeated PLAN text out of Codex tool output.
 ---
 
 # Execute Plan with Antigravity
 
-Codex is the supervisor and source of execution judgment. Antigravity is the bounded implementation worker for one `PLAN-XX` task at a time.
+Codex is the control plane. MCP is the deterministic orchestration plane. Antigravity is the implementation/data plane.
 
-Use this skill when the user asks to execute, run, implement, or begin coding an already-approved plan/blueprint with Antigravity. This skill owns multi-PLAN sequencing and review policy. The `delegate-to-antigravity` skill owns AGY worker mechanics.
+The goal is not to minimize useful Codex reasoning. Codex should read repository evidence and review deeply. The goal is to avoid making Codex regenerate large PLAN/context/boilerplate text that the MCP server can copy or reconstruct without model tokens.
 
 ## 1. Execution gate
 
-Before any implementation delegation:
+Before implementation:
 
-1. Locate the approved blueprint.
-2. Require exactly `Blueprint status: READY`.
-3. Require `## Implementation Tasks` with stable `PLAN-XX` tasks.
-4. Do not execute a `BLOCKED` blueprint.
-5. Do not silently fill missing material decisions or rewrite the approved architecture during execution.
-6. If the blueprint is stale enough that its target paths, symbols, contracts, or prerequisites no longer match the checkout, stop and request re-planning rather than improvising.
+1. Locate the approved blueprint already rendered in this Codex thread.
+2. Require the exact `<!-- AGY_BLUEPRINT:v1:START -->` / `<!-- AGY_BLUEPRINT:v1:END -->` canonical form.
+3. Require `Blueprint status: READY`.
+4. Require `## Implementation Tasks` with stable `PLAN-XX` tasks.
+5. Do not execute a `BLOCKED` blueprint.
+6. Do not silently fill a missing material decision during execution. Return to `$execution-blueprint` when architecture/product/API/database/security/scope decisions change.
 
-A missing optional `Blueprint basis` is not by itself a blocker. When basis metadata exists, compare it with the current checkout as a freshness signal; ordinary unrelated drift is acceptable if the PLAN change surface and contracts remain valid.
+The first `agy_start_plan` call captures the latest canonical READY blueprint from the current Codex thread through MCP `threadId` metadata and persists it under local plugin state. **Do not copy the blueprint into a tool argument as a fallback.** If capture is unavailable or malformed, stop and report that concrete capture problem.
 
 ## 2. Responsibility boundary
 
-During this workflow:
+### Codex owns
 
-- Codex reads repository/project instructions, resolves the execution contract, records baselines, reviews actual workspace changes, runs or verifies canonical validation, and decides PASS / FAIL / BLOCKED.
-- AGY performs bounded repository inspection, implementation edits, and delegated validation inside the current checkout.
-- Codex does not patch implementation files itself unless the user explicitly asks for supervisor fallback. Review failures go back to the owning AGY worker.
-- `delegate-to-antigravity` is the source of truth for AGY Project resolution, workspace attestation, managed-worker lifecycle, idempotency/retry semantics, wait/status/result behavior, recovery, and cancellation.
-- This skill is the source of truth for blueprint readiness, PLAN ordering, baselines, per-PLAN review, cross-PLAN final audit, and worker close timing for an execution run.
+- planning and repository understanding;
+- applicable project/user instruction hierarchy;
+- semantic interpretation of conventions and precedents;
+- material architecture/API/database/product decisions;
+- deep review of actual implementation and edge cases;
+- `PLAN_PASS` / `PLAN_FAIL` / `PLAN_BLOCKED`;
+- final whole-blueprint semantic audit.
 
-Do not create worktrees, branches, commits, or merges unless the user explicitly requested them or a higher-priority project instruction requires them.
+### MCP owns deterministic mechanics
 
-Never delegate credentials, production operations, destructive external actions, database mutations, generated-model refreshes, deployments, purchases, or external messages unless the user explicitly authorized that exact scope and project policy allows it.
+- capture/persistence/parsing of the canonical blueprint;
+- execution-run identity and worker ↔ PLAN mapping;
+- server-side AGY prompt construction;
+- selected source-file materialization from PLAN context;
+- per-PLAN baselines;
+- changed-path / write-scope / forbidden-scope checks;
+- preservation checks for pre-existing outside-scope changes;
+- bounded diff preparation;
+- canonical validation execution when the PLAN declares an executable command;
+- worker lifecycle/idempotency/recovery metadata;
+- correction prompt reconstruction from original PLAN + Codex findings.
 
-## 3. Resolve the execution run
+### AGY owns
 
-Before `PLAN-01`:
+- implementation edits;
+- code generation and correction output;
+- reading the supplied target/reference context plus only narrowly necessary direct dependencies;
+- supplied validation work;
+- reporting BLOCKED instead of inventing a material decision.
 
-1. Read applicable `AGENTS.md` files and authoritative project/user instructions for the selected checkout.
-2. Read the complete approved blueprint.
-3. Resolve the absolute checkout path.
-4. Verify Git status when the project requires Git-backed execution.
-5. Record the execution baseline:
-   - current Git HEAD when available;
-   - `git status --short`;
-   - existing user changes relevant to the blueprint change surface.
-6. Call `agy_check` before the first AGY delegation and require compatible managed-worker support for implementation.
-7. Initialize an execution-run identity used to derive stable worker idempotency keys.
+Codex does not patch implementation files itself unless the user explicitly requests supervisor fallback.
 
-Do not dump the whole repository diff into model context merely to establish a baseline. Inspect and preserve the smallest evidence needed to distinguish pre-existing user changes from worker changes.
+## 3. Start the execution run
 
-## 4. Resolve each PLAN contract
+Call `agy_check` before the first delegation and require compatible managed-worker support.
 
-Before starting a PLAN, resolve these fields from the blueprint plus project instructions:
-
-- `Task ID`
-- `Goal`
-- `Owned Paths` from the PLAN write scope
-- `Forbidden Paths`
-- `Read-only Context`
-- `Acceptance Criteria`
-- `Project Constraints` relevant to this PLAN only
-- `Canonical Validation`
-- `Stop Conditions`
-
-If a required field is missing but can be resolved unambiguously from authoritative project instructions or repository evidence, Codex may resolve it without changing the approved product/architecture decision. If resolving it would require a material design choice, the run is BLOCKED and must return to planning.
-
-`PROJECT CONSTRAINTS` must contain only task-relevant rules. Do not make AGY rediscover instruction hierarchy that Codex has already resolved.
-
-## 5. Per-PLAN baseline
-
-Immediately before each fresh PLAN worker starts:
-
-- capture `git status --short`;
-- capture the pre-existing diff for Owned Paths;
-- record hashes or equivalent file identity only when useful for separating overlapping user edits.
-
-Never auto-revert user changes. If execution produces changes outside Owned Paths, Codex must inspect ownership before continuing.
-
-## 6. Start a fresh PLAN worker
-
-Use one fresh managed AGY worker per `PLAN-XX`. A PLAN worker is never reused for a different PLAN.
-
-For the first worker, `projectId`, `model`, or `effort` may be left unresolved so the plugin can obtain only the missing selections. After a successful first start, pin and reuse the returned:
-
-- `agyProjectId` when available;
-- `model`;
-- `effort`.
-
-Pass those values to later fresh PLAN workers so the execution run does not repeatedly ask for the same selection. Follow-ups on an existing worker inherit its Project and must not re-select it.
-
-Choose a stable `idempotencyKey` for the logical PLAN start. A recommended form is derived from the execution-run identity plus task ID, for example:
+For the first PLAN, call only the compact high-level tool:
 
 ```text
-<run-key>:PLAN-01
+agy_start_plan({
+  planId: "PLAN-01",
+  cwd: <absolute checkout>,
+  // projectId/model/effort only when already explicitly selected
+})
 ```
 
-If an `agy_start` request/result is lost or uncertain, retry with the exact same key.
+Do **not** generate or pass:
 
-Start implementation with `mode: "accept-edits"` only because the user has already requested execution.
+- PLAN text;
+- whole blueprint text;
+- AGY execution boilerplate;
+- source-file contents;
+- project conventions already present in the canonical PLAN.
 
-The delegated prompt should contain the bounded execution contract, not the whole chat history:
+The MCP server will:
+
+1. read current Codex `threadId` metadata;
+2. capture the latest canonical blueprint from the local Codex rollout;
+3. validate workspace/readiness/schema;
+4. persist the blueprint once;
+5. create `runId`;
+6. capture the PLAN baseline;
+7. build the long AGY prompt server-side;
+8. materialize approved target/reference source where bounded;
+9. start the fresh AGY worker.
+
+Preserve returned `runId`, `blueprintId`, `workerId`, and `conversationId`.
+
+For every later PLAN in the same blueprint, call:
 
 ```text
-EXPECTED WORKSPACE
-<absolute checkout>
-
-ROLE
-You are the bounded implementation worker for <PLAN-XX>.
-Codex has already planned the repository-level change and will independently review the workspace delta.
-
-OWNED PATHS
-<write scope>
-
-FORBIDDEN PATHS
-<explicit forbidden scope or None>
-
-READ-ONLY CONTEXT
-<direct dependencies / precedents / contracts>
-
-PROJECT CONSTRAINTS
-<task-relevant resolved rules only>
-
-TASK
-<goal, required changes, implementation logic, failure/boundary behavior>
-
-ACCEPTANCE CRITERIA
-<observable completion criteria>
-
-CANONICAL VALIDATION
-<resolved command/check/scenario>
-
-STOP CONDITIONS
-<exact conditions requiring escalation rather than inference>
+agy_start_plan({
+  runId: <same run>,
+  planId: "PLAN-02"
+})
 ```
 
-Do not duplicate generic AGY execution rules already owned by `delegate-to-antigravity` unless a project-specific constraint overrides or tightens them.
+The run reuses workspace, blueprint, Project/model/effort selections. Each PLAN still gets a fresh logical worker and conversation.
 
-## 7. Wait for the worker correctly
+## 4. PLAN ordering
 
-After `agy_start` or `agy_followup`:
+Follow `#### Depends on` exactly. Do not start a dependent PLAN before every prerequisite PLAN has received Codex `PLAN_PASS`.
 
-1. Preserve `workerId` and `conversationId`.
-2. Use `agy_wait(workerId)` as the normal completion barrier.
-3. If `agy_wait` returns `done=false` only because the passive wait interval ended, call `agy_wait` again on the same worker.
-4. A running worker is not a blocker and is not permission to start the next PLAN.
-5. Use `agy_status` when lifecycle state is uncertain, especially after Codex/MCP restart.
+One PLAN worker is never reused for another PLAN. Parallel execution is allowed only when the approved blueprint explicitly makes tasks independent and the user/workflow allows parallel work; otherwise preserve blueprint order.
 
-Do not orchestrate long work with shell sleeps or frequent model-driven polling.
+After a PLAN passes, keep its worker open but idle until the final whole-blueprint audit so an integration finding can return to the original owning conversation.
 
-## 8. Independent PLAN audit
+## 5. Completion barrier
 
-When the worker turn reaches a terminal state, Codex reviews the current workspace itself. The AGY narrative is advisory, not proof.
+After `agy_start_plan` or `agy_followup`:
+
+1. call `agy_wait(workerId)`;
+2. preserve the same worker when a passive wait interval expires;
+3. if `done=false` only because the wait timed out, call `agy_wait` again;
+4. do not start the next dependent PLAN merely because the worker is still running;
+5. use `agy_status` only when lifecycle/recovery state is genuinely uncertain.
+
+Do not orchestrate long work with shell sleeps, frequent `agy_status`, or model-driven polling. `agy_wait` performs the passive polling inside MCP, with a long default interval.
+
+A terminal AGY `ERROR` is not automatically an implementation failure. The workspace plus independent review remain authoritative.
+
+## 6. Deterministic review evidence
+
+Once the PLAN worker reaches a terminal state, call:
+
+```text
+agy_review_plan({
+  runId,
+  planId
+})
+```
+
+This tool may run the PLAN's canonical validation and therefore can mutate ordinary build/test artifacts; it does not make the semantic verdict.
+
+The review bundle supplies:
+
+- original approved PLAN contract;
+- changed files relative to the per-PLAN baseline;
+- unauthorized changes;
+- forbidden-scope changes;
+- detected modification of pre-existing outside-scope user changes;
+- validation command/result/output when executable;
+- bounded owned-path diff;
+- explicit truncation/incomplete flags.
+
+If the bundle says a diff is truncated/incomplete, Codex should inspect the listed changed files and surrounding source directly rather than lowering review quality.
+
+## 7. Deep Codex semantic review
+
+Codex should spend reasoning budget here. Review the actual code, not merely AGY's narrative.
 
 Audit at minimum:
 
-- actual diff relative to the PLAN baseline;
-- no unauthorized changes outside Owned Paths;
-- pre-existing user changes were preserved;
-- implementation matches the approved PLAN and acceptance criteria;
-- project constraints and forbidden paths were respected;
-- encoding/BOM/line-ending concerns when relevant to the project;
-- canonical validation and its actual result;
-- no unrelated refactor or scope expansion.
+- implementation matches the approved PLAN intent and exact material decisions;
+- naming and structure follow the precedents/conventions Codex identified while planning;
+- no invented helper/abstraction/API/DTO/schema pattern slipped in;
+- null/error/loading/boundary behavior matches the PLAN and repository conventions;
+- no missed edge case or regression in directly affected control/data flow;
+- public contracts remain compatible unless explicitly approved otherwise;
+- changed files and mechanical scope evidence are acceptable;
+- pre-existing user changes remain preserved;
+- validation result is real and relevant;
+- no unrelated refactor, speculative cleanup, or scope expansion was introduced.
 
-Judge implementation correctness independently from AGY transport/report status. `agyStatus=ERROR` does not automatically mean the code failed; inspect the workspace and validation first.
-
-Return exactly one internal verdict for the current PLAN:
+Return one internal verdict:
 
 - `PLAN_PASS`
 - `PLAN_FAIL`
 - `PLAN_BLOCKED`
 
-`PLAN_BLOCKED` is only for a genuine unresolved prerequisite or material decision that cannot be safely corrected inside the approved blueprint.
+Do not force PASS just because mechanical checks pass. Conversely, do not fail correct code solely because AGY's terminal narrative/status is imperfect.
 
-## 9. Correction loop
+## 8. Correction loop without PLAN duplication
 
-On `PLAN_FAIL`:
+On `PLAN_FAIL`, produce detailed review findings. Quality matters more than making findings artificially tiny.
 
-1. Convert Codex review findings into a concrete, minimal correction prompt.
-2. Use `agy_followup` with the same `workerId`.
-3. Use a stable correction key such as:
+Send **findings only**:
 
 ```text
-<run-key>:PLAN-01:FIX-01
+agy_followup({
+  workerId,
+  findings: [
+    {
+      file: "...",
+      symbol: "...",
+      problem: "...",
+      expected: "...",
+      rationale: "..."
+    }
+  ]
+})
 ```
 
-4. Reuse the exact same correction key if submission/result is uncertain.
-5. Wait again with `agy_wait`.
-6. Re-audit the workspace.
-7. Repeat until `PLAN_PASS` or `PLAN_BLOCKED`.
+Do not append the original PLAN, source context, static AGY rules, or blueprint text. MCP maps `workerId → runId → blueprintId → PLAN`, reconstructs the correction prompt server-side, and uses a stable derived correction key when none is supplied.
 
-Corrections must patch only concrete findings unless a broader change is strictly required by the approved PLAN. If the required fix changes architecture, public contracts, database/schema decisions, or approved scope, stop and return to planning instead of broadening the worker's authority.
+Then:
 
-Do not send a no-op correction merely to convert an AGY terminal report from ERROR to SUCCESS when Codex audit already passes.
+1. `agy_wait(workerId)`;
+2. `agy_review_plan({ runId, planId })` again;
+3. repeat deep Codex review;
+4. continue until `PLAN_PASS` or `PLAN_BLOCKED`.
 
-## 10. PLAN transition policy
+A correction may address only concrete findings unless the approved PLAN itself requires a broader change. If the fix needs a new material decision, return to planning.
 
-Only a `PLAN_PASS` may advance dependency execution.
+## 9. Final whole-blueprint audit
 
-After a PLAN passes:
-
-- record its final reviewed delta and validation evidence;
-- keep its worker open but idle until the final whole-blueprint audit completes;
-- begin the next dependency-ready PLAN with a fresh worker.
-
-Keeping passed workers open allows a later integration finding to be corrected in the original owning conversation. The plugin may release the warm process while preserving the logical worker as recoverable; that is acceptable.
-
-Do not use a passed PLAN worker as implementation context for another PLAN.
-
-## 11. Final whole-blueprint audit
-
-After every requested PLAN has individually passed, Codex must review the cumulative implementation against the entire approved blueprint.
+After all requested PLANs individually pass, Codex reviews the cumulative workspace against the entire canonical blueprint.
 
 Verify:
 
-- all requested PLANs are implemented;
-- cross-PLAN contracts and data/control flow agree;
-- cumulative diff stays within the blueprint's total approved change surface;
-- explicit non-goals remain unchanged;
+- every requested PLAN is implemented;
+- cross-PLAN contracts/data/control flow agree;
+- cumulative behavior still matches the architectural decisions and non-goals;
+- no PLAN-local choice introduced an integration regression;
 - final integration/build/test/manual verification required by the blueprint passes;
-- no PLAN-local implementation introduced an integration regression hidden by its local check.
+- naming/convention consistency remains intact across PLAN boundaries.
 
-Final audit verdict:
+Final verdict:
 
 - `BLUEPRINT_PASS`
 - `BLUEPRINT_FAIL`
 - `BLUEPRINT_BLOCKED`
 
-On `BLUEPRINT_FAIL`, route each concrete finding back to the worker that owns the affected change surface using `agy_followup`, then re-run the affected PLAN audit and the final whole-blueprint audit. If a finding spans multiple PLANs, use the narrowest owning worker(s) necessary and preserve approved task boundaries.
+On `BLUEPRINT_FAIL`, route each concrete finding to the original owning worker using `agy_followup(findings)`, then re-review affected PLANs and repeat the final audit. Use the narrowest owning worker(s) necessary.
 
-If the final finding requires a new material architecture/product/API/database decision not present in the blueprint, return `BLUEPRINT_BLOCKED` and require re-planning.
+If the final issue requires a new unapproved material decision, return `BLUEPRINT_BLOCKED` and re-plan instead of granting AGY new authority.
 
-## 12. Close workers
+## 10. Close and cleanup
 
-Call `agy_close` only after `BLUEPRINT_PASS`, or when the user explicitly ends the run and no further correction will be attempted.
+Call `agy_close` only after `BLUEPRINT_PASS`, or when the user explicitly abandons the run.
 
-After `BLUEPRINT_PASS`:
+After the last PLAN worker in a run is closed, MCP removes temporary baseline source snapshots while retaining bounded blueprint/run/worker audit metadata. Do not create commits/branches/merges unless separately requested.
 
-1. Close every PLAN worker created by this execution run.
-2. Retain their local audit metadata/conversation history as provided by the plugin.
-3. Do not create commits or merges unless separately requested.
+A cleanup failure is not an implementation failure; report it separately.
 
-If closing one worker fails after implementation already passed, report the cleanup problem separately; do not reinterpret correct code as an implementation failure.
+## 11. Recovery
 
-## 13. Recovery and interruption
+After Codex/MCP restart:
 
-If Codex/MCP restarts or a worker becomes recoverable:
+- use `agy_status` for persisted worker state;
+- reuse the original `runId` and PLAN worker mapping when available;
+- never create a duplicate worker merely because response text is no longer in MCP memory;
+- resume corrections through `agy_followup` on the original `conversationId`;
+- use the persisted PLAN baseline for review when available.
 
-- use `agy_status` to inspect durable worker state;
-- do not start a duplicate worker for the same PLAN merely because response text is unavailable;
-- inspect the workspace and durable status before deciding whether a correction is necessary;
-- resume corrections with `agy_followup` on the original worker/conversation when appropriate.
+## 12. Final user report
 
-If the user cancels the execution run, use `agy_cancel` only for active turns that are no longer useful. Do not treat cancellation of an `agy_wait` request as cancellation of the worker itself.
+Report compactly:
 
-## 14. Final user report
-
-After completion, report compactly:
-
-- blueprint executed;
+- blueprint/run executed;
 - PLANs completed;
-- files/change areas affected;
+- affected files/change areas;
 - validation performed;
 - final whole-blueprint verdict;
-- any deviations, blockers, or cleanup issues.
+- any genuine deviations, blockers, or cleanup issues.
 
-Do not dump worker transcripts or hidden reasoning. The source of truth is the reviewed workspace and validation evidence.
+Do not dump worker transcripts or hidden reasoning. The source of truth is the canonical blueprint, reviewed workspace, and validation evidence.
