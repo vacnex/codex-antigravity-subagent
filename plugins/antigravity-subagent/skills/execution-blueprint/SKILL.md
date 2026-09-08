@@ -19,11 +19,14 @@ Before writing the blueprint, Codex should inspect enough authoritative reposito
 - direct dependencies and public contracts;
 - nearest existing implementation patterns and naming conventions;
 - validation/build/test commands appropriate to the affected area;
-- user changes or constraints that must be preserved.
+- user changes or constraints that must be preserved;
+- user-provided external specifications/documents when they are needed to decide the implementation contract.
 
 Do not delegate this planning pass to Antigravity. AGY is the implementation worker; Codex is the planner and later semantic reviewer.
 
-Remove material choices from the executor, but do not waste output tokens by copying source files into the blueprint. Point to exact files/symbols and state the convention or decision that matters.
+Remove material choices from the executor, but do not waste output tokens by copying source files into the blueprint. Point to exact repository files/symbols and state the convention or decision that matters.
+
+External files outside the workspace are **planning evidence only**. Codex may read them while planning, but must not put their absolute paths into `Write scope`, `Forbidden scope`, or `Required read set`. Distill every execution-relevant fact from such evidence into `Required conventions`, `Required changes`, `Implementation logic`, `Failure and boundary behavior`, `Acceptance criteria`, or `Stop if`. If an external specification contains details that cannot be captured precisely enough for deterministic execution, return `Blueprint status: BLOCKED` instead of expecting AGY to rediscover/read that external document.
 
 ## 2. Output language
 
@@ -143,9 +146,17 @@ None
 
 For `Depends on`, use `None` or list PLAN IDs. For optional empty scopes, use exactly `None`.
 
-For file paths, prefer relative paths from the workspace root and wrap each path in backticks. `Write scope` should be narrow and concrete; use a directory only when the approved change genuinely owns that directory. Avoid glob-heavy scopes.
+### Execution-path contract
 
-`Required read set` is controlled context, not write permission. Include the target files, direct dependencies, and proven precedent files that AGY needs to implement without rediscovering repository conventions. A worker may inspect a narrowly direct dependency only when implementation requires it, but it must stop rather than perform broad architecture discovery.
+`Write scope`, `Forbidden scope`, and `Required read set` are machine-consumed execution path sections, not prose sections.
+
+- Every entry in those sections must be a workspace-relative path wrapped in backticks.
+- Never use an absolute path, `..` escape, drive path, UNC path, URL, friendly label, symbol description, or free-form prohibition in those sections.
+- `Write scope` should be narrow and concrete; use a directory only when the approved change genuinely owns that directory. Avoid glob-heavy scopes.
+- `Forbidden scope` contains only concrete files/directories that must not be touched. Semantic prohibitions such as “do not change generated EDMX”, “do not modify legacy methods”, “do not change database schema”, or product/API non-goals belong in `Required conventions`, `Failure and boundary behavior`, or `Stop if` unless there is a concrete workspace path to list.
+- `Required read set` contains only workspace-local target/direct-dependency/proven-precedent files that AGY may inspect during execution. External user documents/specifications must be consumed by Codex during planning and distilled into the PLAN contract instead.
+
+`Required read set` is controlled context, not write permission. Include enough workspace-local target/direct-dependency/precedent context for AGY to implement without rediscovering repository conventions. A worker may inspect a narrowly direct dependency only when implementation requires it, but it must stop rather than perform broad architecture discovery.
 
 ## 6. Convention capture
 
@@ -157,9 +168,10 @@ Codex should spend input/reasoning budget where it improves correctness. Read th
 - established error/loading/null handling pattern;
 - project-specific helpers/wrappers that must be reused;
 - generated or forbidden artifacts that must not be edited;
-- encoding/BOM/line-ending constraints when relevant.
+- encoding/BOM/line-ending constraints when relevant;
+- exact externally specified API fields/values/endpoint rules when an external document was part of planning evidence.
 
-Do not merely say "follow project conventions" when Codex can identify the actual convention and precedent.
+Do not merely say "follow project conventions" when Codex can identify the actual convention and precedent. Do not say “follow the external document” when that document is outside the workspace; encode the execution-relevant contract directly in the blueprint.
 
 ## 7. Executor authority boundary
 
@@ -167,7 +179,7 @@ A READY blueprint must leave AGY implementation work but not material design aut
 
 AGY may:
 
-- read the supplied target/reference files;
+- read the supplied workspace-local target/reference files;
 - inspect one direct dependency when necessary to implement an approved symbol;
 - make bounded edits inside Write scope;
 - run the supplied canonical validation;
@@ -186,8 +198,12 @@ Before emitting `Blueprint status: READY`, verify:
 - the workspace is correct and absolute;
 - every PLAN has all canonical headings;
 - PLAN dependencies reference real PLAN IDs;
+- every Write/Forbidden/Required-read entry is a workspace-relative path and cannot escape the workspace;
+- no external document path appears in any execution path section;
+- external planning evidence has been distilled into a deterministic execution contract, or the blueprint is `BLOCKED` if that is not possible;
 - Write scope and Forbidden scope do not conflict;
-- Required read set gives the worker enough proven context without inviting broad exploration;
+- Forbidden scope contains paths only; semantic non-goals/prohibitions are captured in semantic PLAN sections;
+- Required read set gives the worker enough proven workspace-local context without inviting broad exploration;
 - conventions and public behavior are explicit enough to prevent invention;
 - acceptance criteria and validation are concrete;
 - Stop if catches missing material decisions;
