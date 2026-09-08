@@ -45,6 +45,18 @@ Continue the existing PLAN conversation. The Codex supervisor independently revi
 - Re-run canonical validation when the correction can affect it.
 `;
 
+const RESUME_POLICY = `AGY PLAN RECOVERY POLICY
+
+Resume the same approved PLAN in this existing conversation after a retryable terminal interruption.
+- Inspect the current workspace state before editing.
+- Preserve every correct change already present; do not restart completed work.
+- Continue only unfinished requirements from the original approved PLAN.
+- Do not broaden scope, redesign the PLAN, or perform repository-wide rediscovery.
+- Re-read only the minimum affected context needed to continue safely.
+- If the remaining work needs a material decision absent from the PLAN, stop and report BLOCKED.
+- Run canonical validation when implementation is complete.
+`;
+
 function normalizeRelative(cwd: string, candidate: string): { absolute: string; relative: string } {
   const root = path.resolve(cwd);
   const absolute = path.resolve(root, candidate);
@@ -134,5 +146,13 @@ export function buildCorrectionPrompt(plan: BlueprintPlan, findings: ReviewFindi
     `\nORIGINAL APPROVED PLAN\n${plan.rawMarkdown}`,
     `\nSUPERVISOR FINDINGS\n${findings.map(renderFinding).join('\n\n')}`,
     '\nAfter fixing these findings, stop and report the changed files plus validation result.',
+  ].join('\n');
+}
+
+export function buildResumePrompt(plan: BlueprintPlan): string {
+  return [
+    RESUME_POLICY.trim(),
+    `\nORIGINAL APPROVED PLAN\n${plan.rawMarkdown}`,
+    '\nContinue from the current workspace state, then stop and report changed files plus validation result.',
   ].join('\n');
 }
