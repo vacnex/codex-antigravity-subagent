@@ -111,6 +111,25 @@ function parseDependsOn(section: string): string[] {
     .filter((value, index, values) => values.indexOf(value) === index);
 }
 
+function isAbsoluteOnAnyPlatform(value: string): boolean {
+  return path.isAbsolute(value) || path.win32.isAbsolute(value) || path.posix.isAbsolute(value);
+}
+
+function assertExecutionPath(planId: string, section: string, value: string): void {
+  const cleaned = value.trim().replace(/\\/g, '/').replace(/\/\*\*$/, '').replace(/\/+$/, '');
+  if (!cleaned || cleaned === '.' || isAbsoluteOnAnyPlatform(value)) {
+    throw new Error(
+      `BLUEPRINT_INVALID: ${planId} ${section} must contain workspace-relative paths only; received ${value}. External documents are planning evidence and must be distilled into the blueprint instead of delegated as execution paths.`,
+    );
+  }
+  const normalized = path.posix.normalize(cleaned);
+  if (normalized === '..' || normalized.startsWith('../')) {
+    throw new Error(
+      `BLUEPRINT_INVALID: ${planId} ${section} path escapes the workspace: ${value}.`,
+    );
+  }
+}
+
 function gitHeadsMatch(expectedHead: string, currentHead: string): boolean {
   const expected = expectedHead.trim().toLowerCase();
   const current = currentHead.trim().toLowerCase();
@@ -204,6 +223,9 @@ export function parseBlueprint(canonicalText: string): ExecutionBlueprint {
   if (new Set(ids).size !== ids.length) throw new Error('Blueprint contains duplicate PLAN IDs.');
   for (const plan of plans) {
     if (plan.writeScope.length === 0) throw new Error(`${plan.id} has an empty Write scope.`);
+    for (const value of plan.writeScope) assertExecutionPath(plan.id, 'Write scope', value);
+    for (const value of plan.forbiddenScope) assertExecutionPath(plan.id, 'Forbidden scope', value);
+    for (const ref of plan.requiredReadSet) assertExecutionPath(plan.id, 'Required read set', ref.path);
     for (const dependency of plan.dependsOn) {
       if (!ids.includes(dependency)) throw new Error(`${plan.id} depends on unknown task ${dependency}.`);
       if (dependency === plan.id) throw new Error(`${plan.id} cannot depend on itself.`);
