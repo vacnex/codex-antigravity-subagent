@@ -16,7 +16,7 @@ const blueprintSource = await readFile(path.join(mcpRoot, 'src', 'blueprint.ts')
 const blueprintSkill = await readFile(path.join(pluginRoot, 'skills', 'execution-blueprint', 'SKILL.md'), 'utf8');
 const executeSkill = await readFile(path.join(pluginRoot, 'skills', 'execute-plan', 'SKILL.md'), 'utf8');
 
-assert.equal(packageJson.version, '0.5.0');
+assert.equal(packageJson.version, '0.5.1');
 assert.equal(pluginJson.version, packageJson.version, 'plugin and MCP package versions must stay in sync');
 assert.equal(lockJson.version, packageJson.version, 'package-lock root version must stay in sync');
 assert.equal(lockJson.packages?.['']?.version, packageJson.version, 'package-lock root package version must stay in sync');
@@ -38,11 +38,15 @@ assert.match(blueprintSource, /function\s+gitHeadsMatch\(/);
 assert.match(blueprintSource, /export function assertBlueprintFresh\(/);
 assert.match(blueprintSource, /BLUEPRINT_STALE/);
 assert.match(blueprintSource, /BLUEPRINT_FRESHNESS_UNAVAILABLE/);
+assert.match(blueprintSource, /BLUEPRINT_INVALID/);
+assert.match(blueprintSource, /assertExecutionPath\(plan\.id, 'Required read set'/);
 assert.match(blueprintSource, /assertBlueprintFresh\(blueprint\);/);
 
 assert.match(blueprintSkill, /<!-- AGY_BLUEPRINT:v1:START -->/);
 assert.match(blueprintSkill, /<!-- AGY_BLUEPRINT:v1:END -->/);
 assert.match(blueprintSkill, /#### Required read set/);
+assert.match(blueprintSkill, /External files outside the workspace are \*\*planning evidence only\*\*/);
+assert.match(blueprintSkill, /Forbidden scope contains only concrete files\/directories/);
 assert.match(executeSkill, /agy_start_plan/);
 assert.match(executeSkill, /agy_review_plan/);
 assert.match(executeSkill, /findings only/i);
