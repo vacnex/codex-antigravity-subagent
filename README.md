@@ -36,7 +36,7 @@ Codex may spend substantial input/reasoning budget reading the repository, ident
 The plugin bundles three related skills:
 
 - `$execution-blueprint` inspects repository instructions/source/precedents and produces a canonical implementation-ready `AGY_BLUEPRINT:v1` directly in Codex chat.
-- `$execute-plan` supervises an approved READY blueprint: dependency ordering, one fresh worker per PLAN, Codex semantic review/correction loops, final whole-blueprint audit, and cleanup.
+- `$execute-plan` supervises an approved READY blueprint: dependency ordering, one fresh worker per PLAN, Codex semantic review/correction loops, retryable recovery, final whole-blueprint audit, and cleanup.
 - `$delegate-to-antigravity` manages standalone bounded AGY assignments and the generic worker lifecycle.
 
 ### Canonical blueprint
@@ -75,14 +75,14 @@ v0.5 exposes nine tools:
 | `agy_check` | Verify AGY installation/capabilities and report MCP version |
 | `agy_start` | Start one standalone bounded managed worker from a prompt |
 | `agy_start_plan` | Start one approved PLAN without a PLAN/prompt argument |
-| `agy_followup` | Continue a worker; PLAN workers can receive structured findings only |
+| `agy_followup` | Continue a worker; PLAN workers use structured findings or `resume=true` recovery |
 | `agy_wait` | Long passive completion barrier inside MCP |
-| `agy_review_plan` | Prepare deterministic PLAN review evidence and validation |
+| `agy_review_plan` | Prepare compact deterministic PLAN review/validation evidence; diff is opt-in |
 | `agy_status` | Inspect active/recoverable/closed worker state |
 | `agy_cancel` | Interrupt an active worker turn |
 | `agy_close` | Close a logical worker and retain audit metadata |
 
-The v0.4 `agy_delegate` and `agy_result` surfaces are removed. Standalone bounded work uses `agy_start` + `agy_wait`; lifecycle snapshots use `agy_status`.
+The v0.4 `agy_delegate` and `agy_result` surfaces are removed. Standalone bounded work uses `agy_start` + `agy_wait`; lifecycle snapshots use `agy_status` only when state is genuinely uncertain.
 
 ## Token-efficient PLAN execution
 
@@ -128,7 +128,7 @@ agy_start_plan({
 })
 ```
 
-The run pins its workspace, canonical blueprint, Project/model/effort selections, baseline metadata, and worker-to-PLAN mapping.
+The run pins its workspace, canonical blueprint, Project/model/effort selections, baseline metadata, and worker-to-PLAN mapping. PLAN start acknowledgements include the compact `workerId` and `runId` needed for the next control call.
 
 ## Controlled AGY context
 
@@ -150,7 +150,7 @@ This read policy is a semantic boundary, not a claim that AGY is filesystem-sand
 
 ## Deterministic review + deep Codex review
 
-After AGY completes a PLAN:
+After AGY reaches a terminal PLAN state:
 
 ```text
 agy_wait(workerId)
@@ -160,21 +160,37 @@ agy_review_plan({ runId, planId })
 Codex deep semantic review
 ```
 
-`agy_review_plan` prepares mechanical evidence from the per-PLAN baseline:
+`agy_review_plan` is summary-first in v0.5.2. By default it returns compact mechanical evidence:
 
-- actual owned-path delta;
+- worker terminal failure kind and retryability;
+- whether an owned-path delta exists;
 - changed files;
-- newly modified files outside approved write scope;
+- newly modified paths outside approved write scope;
 - forbidden-scope changes;
 - detected modification of pre-existing outside-scope user changes;
-- canonical validation result/output when the PLAN declares an executable command;
-- bounded relevant diff with explicit truncation/incomplete flags.
+- canonical validation status;
+- a bounded validation failure tail only when validation fails;
+- diff inclusion/truncation metadata.
 
-MCP does **not** decide semantic correctness. Codex should still inspect the code deeply for naming/style conventions, invented abstractions, edge cases, public contract regressions, error/null/loading behavior, and blueprint compliance. If MCP truncates a diff, Codex should inspect the affected files directly rather than reducing review quality.
+The default result does **not** repeat the approved PLAN and does **not** include the owned-path diff. Codex already has the plan and should inspect changed files directly. When a prepared diff materially helps, request it explicitly:
 
-## Correction flow
+```text
+agy_review_plan({
+  runId: "run_...",
+  planId: "PLAN-02",
+  includeDiff: true
+})
+```
 
-When Codex finds a problem, it sends findings instead of repeating the PLAN:
+Successful validation stdout is suppressed. Validation is skipped when there is no executable command or when no owned-path delta exists. If a requested diff is truncated/incomplete, Codex should inspect the affected files directly rather than repeatedly requesting the same large bundle.
+
+Mechanical scope paths are normalized into execution-workspace coordinates even when the Git repository root is above the workspace. New sibling-path changes outside the workspace remain visible as unauthorized, and pre-existing sibling dirty changes are preserved/audited rather than silently filtered.
+
+MCP does **not** decide semantic correctness. Codex should still inspect the code deeply for naming/style conventions, invented abstractions, edge cases, public contract regressions, error/null/loading behavior, and blueprint compliance.
+
+## Correction and retryable recovery flow
+
+When Codex finds a concrete problem, it sends findings instead of repeating the PLAN:
 
 ```text
 agy_followup({
@@ -193,7 +209,16 @@ agy_followup({
 
 MCP maps the worker back to its run/blueprint/PLAN, reconstructs the original execution contract plus static correction policy, appends Codex's findings, and sends that long correction prompt to the existing Antigravity conversation.
 
-Codex can therefore make review findings as detailed as correctness requires without regenerating the original PLAN boilerplate.
+For a terminal retryable worker such as `failureKind=agy_response_timeout`, do not repeatedly call `agy_wait` once `done=true` / `workerContinues=false`. Review the workspace first. If the review reports no owned delta, resume the same worker/conversation explicitly:
+
+```text
+agy_followup({
+  workerId: "agy_...",
+  resume: true
+})
+```
+
+MCP reconstructs the approved PLAN plus a bounded recovery policy server-side. If an owned delta already exists, Codex reviews it first and chooses PASS, concrete findings, or `resume=true` only when unfinished work genuinely remains.
 
 ## Worker lifecycle
 
@@ -205,13 +230,25 @@ Persistent AGY workers use `stream-json` when supported. Managed starts/follow-u
 agy_wait(workerId, timeoutSeconds=900)
 ```
 
-The waiter polls inside the MCP process, not through repeated Codex model turns. Its maximum interval is 1100 seconds, below the bundled MCP `tool_timeout_sec=1200`. If the passive wait expires, the worker continues and can be awaited again.
+The waiter polls inside the MCP process, not through repeated Codex model turns. Its maximum interval is 1100 seconds, below the bundled MCP `tool_timeout_sec=1200`.
+
+If a passive wait expires while `done=false`, the worker continues and can be awaited again. If a terminal result returns `done=true`, the worker is no longer running and should not be awaited again. Retryable PLAN terminals recommend `agy_review_plan` as the next action.
 
 Native MCP Tasks/subscription notifications are intentionally deferred until Codex host support is verified end-to-end.
 
-Use stable idempotency keys for standalone starts/corrections. PLAN starts derive stable run/PLAN keys automatically.
+Use stable idempotency keys for standalone starts/corrections. PLAN starts, structured corrections, and retry resumes derive stable keys automatically.
 
 Passed PLAN workers remain open and idle until the final whole-blueprint audit so an integration finding can be routed back to the original owning conversation. Close all PLAN workers after `BLUEPRINT_PASS`.
+
+## Canonical validation
+
+When a blueprint declares an executable validation command, the command must be shell-safe for the execution platform. Paths containing whitespace must be quoted. On Windows, for example:
+
+```text
+"D:\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\MSBuild.exe" "PMT.HauGiang.Portal\PMT.HauGiang.Portal.csproj" /t:Build /p:VisualStudioVersion=18.0 /m
+```
+
+Obvious unquoted Windows absolute `.exe` paths containing spaces are rejected with `VALIDATION_COMMAND_INVALID` instead of producing a misleading partial-shell failure such as trying to execute `D:\Microsoft`.
 
 ## State and recovery
 
@@ -234,7 +271,7 @@ To distinguish AGY changes from pre-existing user edits, PLAN execution may temp
 
 The worker ledger still does not store prompts, responses, source code, or AGY tool output.
 
-After MCP/Codex restart, open AGY workers can become recoverable. The persisted Antigravity `conversationId` is reused for corrections, and the run retains its PLAN mapping/baseline metadata when available.
+After MCP/Codex restart, open AGY workers can become recoverable. The persisted Antigravity `conversationId` is reused for corrections/recovery, and the run retains its PLAN mapping/baseline metadata when available.
 
 ## Requirements
 
@@ -284,15 +321,18 @@ AGY implements
         ↓
 agy_wait
         ↓
-agy_review_plan
-        ↓
-Codex deep review
-   ┌────┴────┐
- PASS       FAIL
-  │           │
-next PLAN  agy_followup(findings)
-               ↓
-            review again
+terminal?
+  ├─ still running → agy_wait again
+  └─ terminal      → agy_review_plan
+                         ↓
+                    Codex deep review
+              ┌──────────┼────────────┐
+            PASS       FINDINGS     retryable + no delta
+             │            │                 │
+          next PLAN   agy_followup       agy_followup
+                      (findings)          (resume=true)
+                          │                 │
+                          └──────→ wait/review again
 
 all PLANs PASS
         ↓
