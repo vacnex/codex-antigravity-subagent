@@ -93,6 +93,13 @@ try {
   assert.equal(review.validation.output, '', 'successful validation stdout must not enter Codex review context');
   assert.equal(review.diffIncluded, false);
 
+  const untrackedPath = path.join(workspace, 'new-untracked.txt');
+  await writeFile(untrackedPath, 'untracked in workspace\n', 'utf8');
+  const untrackedReview = await baselineModule.reviewPlanBaseline(workspace, plan, baselineDir, baseline.baselineId, false);
+  assert.ok(untrackedReview.unauthorizedChanges.includes('new-untracked.txt'));
+  assert.ok(!untrackedReview.unauthorizedChanges.includes('../new-untracked.txt'));
+  await rm(untrackedPath, { force: true });
+
   await writeFile(path.join(sibling, 'outside.txt'), 'new unauthorized sibling edit\n', 'utf8');
   const outsideReview = await baselineModule.reviewPlanBaseline(workspace, plan, baselineDir, baseline.baselineId, false);
   assert.ok(outsideReview.unauthorizedChanges.some((entry) => entry.endsWith('Sibling.Project/outside.txt')));
