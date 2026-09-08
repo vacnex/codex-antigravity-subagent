@@ -137,7 +137,7 @@ None
 
 #### Canonical validation
 ```text
-<one executable command when appropriate>
+<one executable shell-safe command when appropriate>
 ```
 
 #### Stop if
@@ -157,6 +157,21 @@ For `Depends on`, use `None` or list PLAN IDs. For optional empty scopes, use ex
 - `Required read set` contains only workspace-local target/direct-dependency/proven-precedent files that AGY may inspect during execution. External user documents/specifications must be consumed by Codex during planning and distilled into the PLAN contract instead.
 
 `Required read set` is controlled context, not write permission. Include enough workspace-local target/direct-dependency/precedent context for AGY to implement without rediscovering repository conventions. A worker may inspect a narrowly direct dependency only when implementation requires it, but it must stop rather than perform broad architecture discovery.
+
+### Canonical validation command contract
+
+`Canonical validation` is executed by MCP, so when it contains a command it must be valid for the checkout's platform shell without relying on interactive shell state.
+
+- Use one complete executable command, not prose mixed with a command.
+- Quote every executable or argument path that contains whitespace.
+- On Windows, an absolute executable path containing spaces must be double-quoted, for example:
+
+```text
+"D:\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\MSBuild.exe" "PMT.HauGiang.Portal\PMT.HauGiang.Portal.csproj" /t:Build /p:Configuration=Debug /p:VisualStudioVersion=18.0 /m
+```
+
+- Do not emit an unquoted form such as `D:\Microsoft Visual Studio\...\MSBuild.exe ...`; MCP rejects obvious unquoted Windows executable paths instead of running a misleading partial command.
+- Prefer a command whose exit code reliably expresses validation success/failure. Do not append extra diagnostic commands merely for narrative output.
 
 ## 6. Convention capture
 
@@ -206,6 +221,7 @@ Before emitting `Blueprint status: READY`, verify:
 - Required read set gives the worker enough proven workspace-local context without inviting broad exploration;
 - conventions and public behavior are explicit enough to prevent invention;
 - acceptance criteria and validation are concrete;
+- every executable canonical validation command is shell-safe for the target platform and quotes paths containing whitespace;
 - Stop if catches missing material decisions;
 - the blueprint contains no model/provider/effort selection, worker IDs, routing mechanics, worktree/branch policy, or repeated AGY boilerplate;
 - the complete canonical blueprint appears only once between the exact v1 markers.
