@@ -25,12 +25,12 @@ export type PlanReviewBundle = PlanMechanicalReview & {
 export function validationCommandIssue(command: string, platform = process.platform): string | undefined {
   if (platform !== 'win32') return undefined;
   const trimmed = command.trim();
-  if (!/^[A-Za-z]:\\/.test(trimmed) || trimmed.startsWith('"') || trimmed.startsWith("'")) return undefined;
+  if (!/^[A-Za-z]:\\/.test(trimmed) || trimmed.startsWith('"')) return undefined;
   const exeEnd = trimmed.toLowerCase().indexOf('.exe');
   if (exeEnd < 0) return undefined;
   const executable = trimmed.slice(0, exeEnd + 4);
   if (!/\s/.test(executable)) return undefined;
-  return 'VALIDATION_COMMAND_INVALID: Windows executable paths containing spaces must be quoted, for example "D:\\Program Files\\tool.exe" args.';
+  return 'VALIDATION_COMMAND_INVALID: Windows executable paths containing spaces must be double-quoted, for example "D:\\Program Files\\tool.exe" args.';
 }
 
 function shellLaunch(command: string): { executable: string; args: string[] } {
