@@ -47,12 +47,12 @@ A blueprint that records a concrete `Git HEAD` is valid only while that checkout
 - server-side AGY prompt construction;
 - selected source-file materialization from PLAN context;
 - per-PLAN baselines;
-- changed-path / write-scope / forbidden-scope checks;
-- preservation checks for pre-existing outside-scope changes;
-- bounded diff preparation;
+- workspace-relative changed-path / write-scope / forbidden-scope checks even when the Git root is above the execution workspace;
+- preservation checks for pre-existing outside-scope changes, including sibling paths outside the execution workspace;
+- optional bounded diff preparation;
 - canonical validation execution when the PLAN declares an executable command;
 - worker lifecycle/idempotency/recovery metadata;
-- correction prompt reconstruction from original PLAN + Codex findings.
+- correction/resume prompt reconstruction from the original PLAN without Codex repeating PLAN text.
 
 ### AGY owns
 
@@ -98,7 +98,7 @@ The MCP server will:
 8. materialize approved target/reference source where bounded;
 9. start the fresh AGY worker.
 
-Preserve returned `runId`, `blueprintId`, `workerId`, and `conversationId`.
+Preserve returned `runId`, `blueprintId`, `workerId`, and `conversationId`. The compact text acknowledgement includes `workerId` and `runId`; do not recover them through extra status calls when they were already returned.
 
 For every later PLAN in the same blueprint, call:
 
@@ -119,23 +119,31 @@ One PLAN worker is never reused for another PLAN. Parallel execution is allowed 
 
 After a PLAN passes, keep its worker open but idle until the final whole-blueprint audit so an integration finding can return to the original owning conversation.
 
-## 5. Completion barrier
+## 5. Completion barrier and retryable terminal recovery
 
 After `agy_start_plan` or `agy_followup`:
 
 1. call `agy_wait(workerId)`;
-2. preserve the same worker when a passive wait interval expires;
-3. if `done=false` only because the wait timed out, call `agy_wait` again;
-4. do not start the next dependent PLAN merely because the worker is still running;
-5. use `agy_status` only when lifecycle/recovery state is genuinely uncertain.
+2. if the passive wait interval ends with `done=false` / `workerContinues=true`, preserve the same worker and call `agy_wait` again;
+3. if the worker reaches any terminal state (`done=true` / `workerContinues=false`), **do not call `agy_wait` again**;
+4. use `agy_status` only when lifecycle state is genuinely contradictory or uncertain, not as routine polling;
+5. do not start the next dependent PLAN until the current PLAN has been reviewed and received Codex `PLAN_PASS`.
 
-Do not orchestrate long work with shell sleeps, frequent `agy_status`, or model-driven polling. `agy_wait` performs the passive polling inside MCP, with a long default interval.
+Do not orchestrate long work with shell sleeps, frequent `agy_status`, or model-driven polling. `agy_wait` performs passive polling inside MCP.
 
-A terminal AGY `ERROR` is not automatically an implementation failure. The workspace plus independent review remain authoritative.
+A terminal AGY `ERROR` is not automatically an implementation failure. In particular, `failureKind=agy_response_timeout` can mean the AGY turn performed substantial work but failed to return a final report. The workspace plus independent review remain authoritative.
+
+When `agy_wait` returns a terminal retryable PLAN result, it sets `recommendedNextAction=review_plan`. Follow that instruction directly:
+
+```text
+agy_review_plan({ runId, planId })
+```
+
+Do not insert `agy_status` or another `agy_wait` between the terminal result and this review unless the returned lifecycle fields contradict each other.
 
 ## 6. Deterministic review evidence
 
-Once the PLAN worker reaches a terminal state, call:
+Once the PLAN worker reaches a terminal state, call by default:
 
 ```text
 agy_review_plan({
@@ -144,22 +152,69 @@ agy_review_plan({
 })
 ```
 
-This tool may run the PLAN's canonical validation and therefore can mutate ordinary build/test artifacts; it does not make the semantic verdict.
+The default review is intentionally summary-first and token-bounded. It supplies:
 
-The review bundle supplies:
-
-- original approved PLAN contract;
+- worker terminal failure kind / retryability;
+- whether any owned-path delta exists;
 - changed files relative to the per-PLAN baseline;
 - unauthorized changes;
 - forbidden-scope changes;
 - detected modification of pre-existing outside-scope user changes;
-- validation command/result/output when executable;
-- bounded owned-path diff;
-- explicit truncation/incomplete flags.
+- canonical validation status;
+- validation failure tail only when validation fails;
+- explicit diff metadata.
 
-If the bundle says a diff is truncated/incomplete, Codex should inspect the listed changed files and surrounding source directly rather than lowering review quality.
+The default tool output does **not** repeat the approved PLAN and does **not** include the owned-path diff. Codex already has the canonical PLAN in context and should inspect changed files directly for semantic review.
 
-## 7. Deep Codex semantic review
+Request the bounded MCP diff only when it materially helps:
+
+```text
+agy_review_plan({
+  runId,
+  planId,
+  includeDiff: true
+})
+```
+
+If `diffTruncated` / `diffIncomplete` is true, inspect the listed changed files and targeted Git diff directly rather than repeatedly requesting the same large bundle.
+
+Canonical validation is skipped when no executable command exists or when the PLAN has no owned-path delta. Successful validation stdout is suppressed. Failed validation returns only a bounded tail plus structured exit/timeout/cancel metadata.
+
+## 7. Retryable recovery decision
+
+After a terminal retryable worker has been reviewed:
+
+### No owned delta
+
+If:
+
+```text
+workerRetryable = true
+hasOwnedDelta = false
+```
+
+resume the **same** PLAN worker/conversation with:
+
+```text
+agy_followup({
+  workerId,
+  resume: true
+})
+```
+
+MCP reconstructs the original approved PLAN and recovery policy server-side. Do not manufacture a fake finding describing the timeout, and do not repeat the PLAN text.
+
+Then call `agy_wait(workerId)` and review again.
+
+### Owned delta exists
+
+If `hasOwnedDelta=true`, perform the normal Codex semantic review first. Do not auto-resume merely because the terminal AGY status was retryable. The existing workspace may already contain correct/partial implementation that should be reviewed before another AGY turn is launched.
+
+- If implementation is correct and complete, it may still receive `PLAN_PASS` despite imperfect AGY terminal narrative.
+- If concrete corrections are needed, use `agy_followup(findings)`.
+- If implementation is incomplete but there is no concrete defect beyond an interrupted remaining workload, `resume:true` is appropriate after confirming the existing delta should be preserved.
+
+## 8. Deep Codex semantic review
 
 Codex should spend reasoning budget here. Review the actual code, not merely AGY's narrative.
 
@@ -184,7 +239,7 @@ Return one internal verdict:
 
 Do not force PASS just because mechanical checks pass. Conversely, do not fail correct code solely because AGY's terminal narrative/status is imperfect.
 
-## 8. Correction loop without PLAN duplication
+## 9. Correction loop without PLAN duplication
 
 On `PLAN_FAIL`, produce detailed review findings. Quality matters more than making findings artificially tiny.
 
@@ -216,7 +271,7 @@ Then:
 
 A correction may address only concrete findings unless the approved PLAN itself requires a broader change. If the fix needs a new material decision, return to planning.
 
-## 9. Final whole-blueprint audit
+## 10. Final whole-blueprint audit
 
 After all requested PLANs individually pass, Codex reviews the cumulative workspace against the entire canonical blueprint.
 
@@ -239,7 +294,7 @@ On `BLUEPRINT_FAIL`, route each concrete finding to the original owning worker u
 
 If the final issue requires a new unapproved material decision, return `BLUEPRINT_BLOCKED` and re-plan instead of granting AGY new authority.
 
-## 10. Close and cleanup
+## 11. Close and cleanup
 
 Call `agy_close` only after `BLUEPRINT_PASS`, or when the user explicitly abandons the run.
 
@@ -247,17 +302,18 @@ After the last PLAN worker in a run is closed, MCP removes temporary baseline so
 
 A cleanup failure is not an implementation failure; report it separately.
 
-## 11. Recovery
+## 12. Recovery after Codex/MCP restart
 
-After Codex/MCP restart:
+After restart:
 
-- use `agy_status` for persisted worker state;
+- use `agy_status` once when persisted lifecycle state must be recovered;
 - reuse the original `runId` and PLAN worker mapping when available;
 - never create a duplicate worker merely because response text is no longer in MCP memory;
-- resume corrections through `agy_followup` on the original `conversationId`;
+- for a terminal retryable PLAN, review the persisted baseline delta before `resume:true`;
+- resume corrections/recovery on the original worker/conversation;
 - use the persisted PLAN baseline for review when available.
 
-## 12. Final user report
+## 13. Final user report
 
 Report compactly:
 
