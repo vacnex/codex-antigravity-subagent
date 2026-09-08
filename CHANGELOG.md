@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.2 - 2026-09-08
+
+- Normalize Git dirty paths from repository-root coordinates into execution-workspace coordinates, fixing false `Unauthorized changes` when the approved workspace is nested below the Git root while still detecting new or modified sibling paths outside the workspace.
+- Harden canonical validation on Windows: execute through an explicit platform shell, reject obvious unquoted absolute `.exe` paths containing spaces, suppress successful validation stdout, and return only a bounded failure tail when validation fails.
+- Make `agy_review_plan` summary-first. The default response no longer repeats the approved PLAN or returns the owned-path diff; `includeDiff=true` requests the bounded diff only when Codex actually needs it.
+- Skip canonical validation when a PLAN has no owned-path delta and expose compact structured review metadata such as `hasOwnedDelta`, validation skip reason, diff inclusion/truncation, and worker terminal failure kind/retryability.
+- Add explicit `agy_followup({ workerId, resume: true })` recovery for terminal retryable PLAN workers. MCP reconstructs the original approved PLAN and recovery policy server-side and resumes the same Antigravity conversation without requiring Codex to manufacture a timeout finding or repeat PLAN text.
+- Make terminal retryable `agy_wait` results recommend `agy_review_plan` and explicitly tell Codex not to wait again once `done=true` / `workerContinues=false`, reducing redundant `wait → status → wait → status` recovery loops.
+- Include compact `workerId` and `runId` in PLAN start acknowledgements and consistently direct running workers to `agy_wait`, eliminating the execution-time need to recover `runId` through extra lifecycle calls.
+- Tighten `$execution-blueprint` so executable canonical validation commands are shell-safe and paths containing whitespace are quoted, and update `$execute-plan` for compact review and retryable recovery semantics.
+- Add v0.5.2 regression coverage for nested Git-root workspaces, sibling dirty preservation, Windows validation quoting, diff-on-demand review, and server-side PLAN resume prompts.
+
 ## 0.5.0 - 2026-09-07
 
 - Bundle `$execution-blueprint` into the plugin and define the canonical `AGY_BLUEPRINT:v1` format, including stable PLAN IDs, write/forbidden scopes, controlled read sets, repository conventions, validation, and stop conditions.
@@ -61,7 +73,7 @@
 - Expand `agy_check` to probe Antigravity CLI version, required headless flags, resumable conversations, and model catalog availability.
 - Add compatibility fallbacks for Antigravity model-catalog command variants.
 - Keep the fallback runner aligned with managed-worker model, effort, and conversation behavior.
-- Add protocol and real-CLI smoke coverage for start, follow-up, close, capability reporting, and model/effort resolution.
+- Expand protocol and real-CLI smoke coverage for start, follow-up, close, capability reporting, and model/effort resolution.
 
 ## 0.2.0 - 2026-08-01
 
