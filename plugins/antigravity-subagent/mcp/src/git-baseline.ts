@@ -112,19 +112,18 @@ async function gitRoot(cwd: string): Promise<string> {
 }
 
 /**
- * Git reports paths relative to the repository root even when `git -C` points at a nested
- * workspace. Mechanical PLAN scopes, however, are workspace-relative. Convert every Git path
- * back to the workspace coordinate system. Paths outside the workspace intentionally remain
- * `../...` so new sibling-repository changes are still detected as unauthorized instead of
- * disappearing from the review.
+ * Run every dirty-path query from the resolved Git root so tracked, staged, and untracked paths
+ * share one repository-relative coordinate system. Mechanical PLAN scopes are workspace-relative,
+ * so convert that common Git coordinate system back to the execution workspace afterwards. Paths
+ * outside the workspace intentionally remain `../...` so sibling changes remain reviewable.
  */
 export async function gitChangedPaths(cwd: string): Promise<string[]> {
   const resolvedCwd = path.resolve(cwd);
   const root = await gitRoot(resolvedCwd);
   const groups = await Promise.all([
-    runGit(resolvedCwd, ['diff', '--name-only', '-z']),
-    runGit(resolvedCwd, ['diff', '--cached', '--name-only', '-z']),
-    runGit(resolvedCwd, ['ls-files', '--others', '--exclude-standard', '-z']),
+    runGit(root, ['diff', '--name-only', '-z']),
+    runGit(root, ['diff', '--cached', '--name-only', '-z']),
+    runGit(root, ['ls-files', '--others', '--exclude-standard', '-z']),
   ]);
   const repoRelative = [...new Set(groups.flatMap(splitZero))];
   return repoRelative
@@ -162,7 +161,6 @@ async function enumerateScopeFiles(cwd: string, scopes: string[]): Promise<strin
     else if (kind === 'directory') {
       for (const file of await listFilesRecursively(absolute, cwd)) files.add(file);
     } else if (kind === 'missing') {
-      // A missing exact path is still a valid approved target for a newly-created file.
       files.add(relative);
     }
   }
