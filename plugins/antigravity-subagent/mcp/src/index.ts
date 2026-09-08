@@ -15,7 +15,7 @@ import { captureLatestBlueprintFromThread } from './codex-transcript.js';
 import { capturePlanBaseline } from './git-baseline.js';
 import { withAgyProjectLaunch } from './launch-context.js';
 import { resolveLaunchSelection, type LaunchSelectionReady } from './launch-selection.js';
-import { buildCorrectionPrompt, buildInitialPlanPrompt, type ReviewFinding } from './plan-prompt.js';
+import { buildCorrectionPrompt, buildInitialPlanPrompt, buildResumePrompt, type ReviewFinding } from './plan-prompt.js';
 import { buildPlanReviewBundle } from './plan-review.js';
 import {
   discoverAgyProjects,
@@ -52,7 +52,39 @@ function describeRunningResult(result: RuntimeToolResult, workerId: string): Run
     }
   }
   if (result.content[0]) {
-    result.content[0].text = `${name} (${workerId}) is still running in the background.${progressText} Use agy_wait to wait passively for completion, or agy_status for a lifecycle snapshot.`;
+    result.content[0].text = `${name} (${workerId}) is still running in the background.${progressText} Use agy_wait to wait passively for completion, or agy_status only when lifecycle state is uncertain.`;
+  }
+  return result;
+}
+
+function compactStandaloneStart(result: RuntimeToolResult): RuntimeToolResult {
+  if (!isRunningResult(result) || !result.content[0]) return result;
+  const workerId = typeof result.structuredContent.workerId === 'string' ? result.structuredContent.workerId : 'unknown';
+  const name = typeof result.structuredContent.name === 'string' ? result.structuredContent.name : 'Antigravity worker';
+  result.content[0].text = `Started ${name} (worker=${workerId}). Use agy_wait.`;
+  return result;
+}
+
+function compactPlanStart(result: RuntimeToolResult, run: ExecutionRunRecord, planId: string): RuntimeToolResult {
+  attachRunMetadata(result, run, planId);
+  if (!isRunningResult(result) || !result.content[0]) return result;
+  const workerId = typeof result.structuredContent.workerId === 'string' ? result.structuredContent.workerId : 'unknown';
+  const verb = result.structuredContent.reused === true ? 'Reusing' : 'Started';
+  result.content[0].text = `${verb} ${planId} (worker=${workerId}, run=${run.runId}). Use agy_wait.`;
+  return result;
+}
+
+function annotatePlanTerminalRecovery(
+  result: RuntimeToolResult,
+  binding: { run: ExecutionRunRecord; planId: string } | undefined,
+): RuntimeToolResult {
+  if (!binding || isRunningResult(result) || result.structuredContent.done !== true || result.structuredContent.retryable !== true) return result;
+  result.structuredContent.recommendedNextAction = 'review_plan';
+  const failureKind = typeof result.structuredContent.failureKind === 'string'
+    ? result.structuredContent.failureKind
+    : 'retryable_error';
+  if (result.content[0]) {
+    result.content[0].text = `${binding.planId} turn ended with retryable ${failureKind}. The worker is not running; do not call agy_wait again. Call agy_review_plan before deciding whether to resume or send findings.`;
   }
   return result;
 }
@@ -137,7 +169,7 @@ async function persistProjectMetadata(
           ? metadata.agyProjectResolution
           : undefined,
       agyProjectRegistryDir: typeof metadata.agyProjectRegistryDir === 'string' ? metadata.agyProjectRegistryDir : undefined,
-      agyWorkspaceAttested: metadata.agyWorkspaceAttested === true,
+      agyWorkspaceAttested: true,
       updatedAt: new Date().toISOString(),
     });
     return undefined;
@@ -230,7 +262,7 @@ async function createServer(): Promise<McpServer> {
     { name: 'agy-mcp-server', version: VERSION },
     {
       instructions:
-        'Codex owns repository planning and semantic review. For approved AGY_BLUEPRINT:v1 plans, use agy_start_plan so the MCP server captures the canonical blueprint from the current Codex thread, persists it locally, reconstructs the PLAN prompt server-side, and keeps large repeated handoff text out of Codex tool output. Use agy_review_plan for deterministic scope/diff/validation evidence, then independently review semantics. Send PLAN corrections through agy_followup findings rather than repeating the original PLAN. Use agy_start for standalone bounded delegation. Use agy_wait as the completion barrier, agy_status for lifecycle recovery, agy_cancel for active turns, and agy_close only after the supervising workflow no longer needs corrections.',
+        'Codex owns repository planning and semantic review. For approved AGY_BLUEPRINT:v1 plans, use agy_start_plan so the MCP server captures the canonical blueprint from the current Codex thread, persists it locally, reconstructs the PLAN prompt server-side, and keeps large repeated handoff text out of Codex tool output. Use agy_review_plan for compact deterministic scope/validation evidence and request includeDiff only when needed. Send PLAN corrections through agy_followup findings; use agy_followup resume=true only after a retryable terminal interruption has been reviewed. Use agy_start for standalone bounded delegation. Use agy_wait as the completion barrier, agy_status only for lifecycle uncertainty, agy_cancel for active turns, and agy_close only after the supervising workflow no longer needs corrections.',
     },
   );
 
@@ -309,7 +341,7 @@ async function createServer(): Promise<McpServer> {
       }
 
       const reused = await runtime.reuseExistingStart({ name, cwd: resolvedCwd, idempotencyKey });
-      if (reused) return normalizeManagedResult(await decorateProjectMetadata(reused, runtime));
+      if (reused) return normalizeManagedResult(compactStandaloneStart(await decorateProjectMetadata(reused, runtime)));
 
       const executable = await findAgy();
       if (!executable) return textError('Antigravity CLI was not found. Run agy_check first.', 'AGY_NOT_FOUND');
@@ -366,7 +398,7 @@ async function createServer(): Promise<McpServer> {
       } else {
         result.structuredContent.projectMetadataPersisted = true;
       }
-      result = await decorateProjectMetadata(result, runtime);
+      result = compactStandaloneStart(await decorateProjectMetadata(result, runtime));
       return normalizeManagedResult(result);
     },
   );
@@ -436,7 +468,7 @@ async function createServer(): Promise<McpServer> {
         let existing = describeRunningResult(await runtime.result(existingState.workerId), existingState.workerId);
         existing = await decorateProjectMetadata(existing, runtime);
         existing.structuredContent.reused = true;
-        return normalizeManagedResult(attachRunMetadata(existing, run, planId));
+        return normalizeManagedResult(compactPlanStart(existing, run, planId));
       }
 
       const idempotencyKey = existingState?.idempotencyKey ?? `${run.runId}:${planId}`;
@@ -476,7 +508,7 @@ async function createServer(): Promise<McpServer> {
           });
         }
         decorated.structuredContent.reused = true;
-        return normalizeManagedResult(attachRunMetadata(decorated, run, planId));
+        return normalizeManagedResult(compactPlanStart(decorated, run, planId));
       }
 
       const executable = await findAgy();
@@ -514,7 +546,7 @@ async function createServer(): Promise<McpServer> {
         signal: ctx.mcpReq.signal,
       }));
       const workerId = typeof result.structuredContent.workerId === 'string' ? result.structuredContent.workerId : undefined;
-      if (!workerId || result.isError) return normalizeManagedResult(attachRunMetadata(result, run, planId));
+      if (!workerId || result.isError) return normalizeManagedResult(compactPlanStart(result, run, planId));
 
       let selectedProject = selection.project;
       let projectRegistry = registryBefore;
@@ -544,7 +576,7 @@ async function createServer(): Promise<McpServer> {
       });
       result.structuredContent.blueprintCaptured = !runId;
       result.structuredContent.promptBuiltServerSide = true;
-      return normalizeManagedResult(attachRunMetadata(result, run, planId));
+      return normalizeManagedResult(compactPlanStart(result, run, planId));
     },
   );
 
@@ -560,35 +592,51 @@ async function createServer(): Promise<McpServer> {
     'agy_followup',
     {
       title: 'Follow Up Antigravity Worker',
-      description: 'Launch a correction turn on an existing worker. For a PLAN-bound worker, prefer structured findings; the server reconstructs the original PLAN and correction policy without Codex repeating them.',
+      description: 'Launch a correction/resume turn on an existing worker. PLAN findings and retry recovery are reconstructed server-side so Codex does not repeat the approved PLAN.',
       inputSchema: z.object({
         workerId: z.string().min(1),
         prompt: z.string().min(1).max(100_000).optional().describe('Standalone-worker follow-up prompt. Do not use this to repeat an approved PLAN.'),
         findings: z.array(findingSchema).min(1).max(50).optional().describe('Supervisor findings for a PLAN-bound worker; MCP rebuilds the correction prompt server-side.'),
-        idempotencyKey: z.string().min(1).max(200).optional().describe('Stable retry key. PLAN findings derive a stable key automatically when omitted.'),
+        resume: z.boolean().optional().describe('Set true only to resume a terminal retryable PLAN-bound worker after reviewing its workspace delta.'),
+        idempotencyKey: z.string().min(1).max(200).optional().describe('Stable retry key. PLAN findings/resume derive stable keys automatically when omitted.'),
         timeoutSeconds: z.number().int().min(1).max(1800).default(900),
       }),
       annotations: { readOnlyHint: false, openWorldHint: true, destructiveHint: true, idempotentHint: true },
     },
-    async ({ workerId, prompt, findings, idempotencyKey, timeoutSeconds }, ctx) => {
-      if (Boolean(prompt) === Boolean(findings)) {
-        return textError('Provide exactly one of prompt (standalone worker) or findings (PLAN-bound worker).', 'FOLLOWUP_INPUT_INVALID');
+    async ({ workerId, prompt, findings, resume, idempotencyKey, timeoutSeconds }, ctx) => {
+      const modes = Number(Boolean(prompt)) + Number(Boolean(findings)) + Number(resume === true);
+      if (modes !== 1) {
+        return textError('Provide exactly one of prompt (standalone), findings (PLAN correction), or resume=true (retryable PLAN recovery).', 'FOLLOWUP_INPUT_INVALID');
       }
       let resolvedPrompt = prompt;
       let resolvedKey = idempotencyKey;
       let runBinding: { run: ExecutionRunRecord; planId: string } | undefined;
-      if (findings) {
+
+      if (findings || resume === true) {
         runBinding = await runStore.findByWorkerId(workerId);
-        if (!runBinding) return textError('Structured findings require a PLAN-bound worker.', 'PLAN_WORKER_NOT_FOUND');
+        if (!runBinding) return textError('Structured findings/resume require a PLAN-bound worker.', 'PLAN_WORKER_NOT_FOUND');
         try {
           const stored = await blueprintStore.read(runBinding.run.blueprintId);
           const plan = findPlan(stored.blueprint, runBinding.planId);
-          resolvedPrompt = buildCorrectionPrompt(plan, findings as ReviewFinding[]);
-          resolvedKey ??= `${runBinding.run.runId}:${runBinding.planId}:fix:${createHash('sha256').update(JSON.stringify(findings)).digest('hex').slice(0, 12)}`;
+          if (resume === true) {
+            const current = normalizeManagedResult(await runtime.result(workerId));
+            if (isRunningResult(current)) return textError('Cannot resume a PLAN worker while its current turn is still running.', 'PLAN_RESUME_RUNNING');
+            if (current.structuredContent.done !== true || current.structuredContent.retryable !== true) {
+              return textError('resume=true requires a terminal retryable PLAN worker result.', 'PLAN_RESUME_NOT_RETRYABLE');
+            }
+            resolvedPrompt = buildResumePrompt(plan);
+            const record = await runtime.store.read(workerId);
+            const turnIdentity = record?.lastTurnCompletedAt ?? record?.updatedAt ?? String(current.structuredContent.failureKind ?? 'retryable');
+            resolvedKey ??= `${runBinding.run.runId}:${runBinding.planId}:resume:${createHash('sha256').update(turnIdentity).digest('hex').slice(0, 12)}`;
+          } else {
+            resolvedPrompt = buildCorrectionPrompt(plan, findings as ReviewFinding[]);
+            resolvedKey ??= `${runBinding.run.runId}:${runBinding.planId}:fix:${createHash('sha256').update(JSON.stringify(findings)).digest('hex').slice(0, 12)}`;
+          }
         } catch (error) {
           return textError(error instanceof Error ? error.message : String(error), 'PLAN_CORRECTION_CONTEXT_FAILED');
         }
       }
+
       const result = await runtime.followup({
         workerId,
         prompt: resolvedPrompt!,
@@ -596,11 +644,17 @@ async function createServer(): Promise<McpServer> {
         timeoutSeconds,
         signal: ctx.mcpReq.signal,
       });
-      const decorated = normalizeManagedResult(await decorateProjectMetadata(result, runtime));
+      let decorated = normalizeManagedResult(await decorateProjectMetadata(result, runtime));
       if (runBinding) {
         decorated.structuredContent.promptBuiltServerSide = true;
-        return attachRunMetadata(decorated, runBinding.run, runBinding.planId);
+        attachRunMetadata(decorated, runBinding.run, runBinding.planId);
+        if (isRunningResult(decorated) && decorated.content[0]) {
+          const mode = resume === true ? 'resume' : 'correction';
+          decorated.content[0].text = `Started ${mode} for ${runBinding.planId} (worker=${workerId}, run=${runBinding.run.runId}). Use agy_wait.`;
+        }
+        return decorated;
       }
+      decorated = compactStandaloneStart(decorated);
       return decorated;
     },
   );
@@ -626,7 +680,8 @@ async function createServer(): Promise<McpServer> {
           result.structuredContent.workerContinues = false;
           result = await decorateProjectMetadata(result, runtime);
           const binding = await runStore.findByWorkerId(workerId);
-          return normalizeManagedResult(binding ? attachRunMetadata(result, binding.run, binding.planId) : result);
+          const normalized = normalizeManagedResult(binding ? attachRunMetadata(result, binding.run, binding.planId) : result);
+          return annotatePlanTerminalRecovery(normalized, binding);
         }
         if (ctx.mcpReq.signal.aborted) {
           result = annotateWaitExit(result, workerId, 'canceled');
@@ -656,15 +711,16 @@ async function createServer(): Promise<McpServer> {
     'agy_review_plan',
     {
       title: 'Prepare PLAN Review Evidence',
-      description: 'Build deterministic review evidence for a PLAN-bound worker: baseline delta, write/forbidden-scope checks, preservation of pre-existing outside-scope changes, canonical validation, and bounded diff. Codex still performs the semantic review and final PASS/FAIL judgment.',
+      description: 'Build compact deterministic evidence for a PLAN-bound worker: baseline delta, scope checks, preservation checks, and canonical validation. Diff text is omitted by default and included only when includeDiff=true.',
       inputSchema: z.object({
         runId: z.string().regex(/^run_[A-Za-z0-9-]{8,}$/),
         planId: z.string().regex(/^PLAN-\d{2,}$/),
         validationTimeoutSeconds: z.number().int().min(1).max(1800).default(900),
+        includeDiff: z.boolean().default(false).describe('Include the bounded owned-path diff in tool text; default false to keep Codex context compact.'),
       }),
       annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false, idempotentHint: true },
     },
-    async ({ runId, planId, validationTimeoutSeconds }, ctx) => {
+    async ({ runId, planId, validationTimeoutSeconds, includeDiff }, ctx) => {
       let run: ExecutionRunRecord;
       try {
         run = await runStore.read(runId);
@@ -674,7 +730,7 @@ async function createServer(): Promise<McpServer> {
         if (!state?.workerId || !state.baselineId) {
           return textError(`${planId} has no registered PLAN worker/baseline in ${runId}.`, 'PLAN_NOT_STARTED');
         }
-        const workerState = await runtime.result(state.workerId);
+        const workerState = normalizeManagedResult(await runtime.result(state.workerId));
         if (isRunningResult(workerState)) {
           return textError(`${planId} worker ${state.workerId} is still running; wait before review.`, 'PLAN_STILL_RUNNING');
         }
@@ -684,29 +740,38 @@ async function createServer(): Promise<McpServer> {
           baselineDir: runStore.baselineDir(runId, planId),
           baselineId: state.baselineId,
           validationTimeoutSeconds,
+          includeDiff,
           signal: ctx.mcpReq.signal,
         });
+        const hasOwnedDelta = bundle.changedFiles.length > 0;
+        const workerFailureKind = typeof workerState.structuredContent.failureKind === 'string'
+          ? workerState.structuredContent.failureKind
+          : 'unknown';
+        const workerRetryable = workerState.structuredContent.retryable === true;
+        const validationSummary = bundle.validation.skipped
+          ? `SKIPPED (${bundle.validation.skippedReason ?? 'unspecified'})`
+          : bundle.validation.exitCode === 0 && !bundle.validation.timedOut && !bundle.validation.canceled && !bundle.validation.launchError
+            ? 'PASS (exit=0)'
+            : `FAIL (exit=${String(bundle.validation.exitCode)}, timedOut=${bundle.validation.timedOut}, canceled=${bundle.validation.canceled})`;
         const lines = [
-          `PLAN REVIEW BUNDLE: ${planId}`,
+          `PLAN REVIEW: ${planId}`,
           `Run: ${runId}`,
-          `Blueprint: ${run.blueprintId}`,
-          `Mechanical status: ${bundle.mechanicalStatus.toUpperCase()}`,
+          `Mechanical: ${bundle.mechanicalStatus.toUpperCase()}`,
+          `Worker terminal: ${workerFailureKind}${workerRetryable ? ' (retryable)' : ''}`,
+          `Owned delta: ${hasOwnedDelta ? 'yes' : 'no'}`,
           `Changed files: ${bundle.changedFiles.length ? bundle.changedFiles.join(', ') : '(none)'}`,
-          `Unauthorized changes: ${bundle.unauthorizedChanges.length ? bundle.unauthorizedChanges.join(', ') : '(none)'}`,
-          `Forbidden changes: ${bundle.forbiddenChanges.length ? bundle.forbiddenChanges.join(', ') : '(none)'}`,
-          `Pre-existing outside-scope changes modified: ${bundle.preExistingOutsideScopeModified.length ? bundle.preExistingOutsideScopeModified.join(', ') : '(none)'}`,
-          '',
-          'APPROVED PLAN',
-          plan.rawMarkdown,
-          '',
-          'CANONICAL VALIDATION RESULT',
-          bundle.validation.skipped
-            ? 'No executable Command/code-fence was declared; perform the blueprint manual validation during semantic review.'
-            : `Command: ${bundle.validation.command}\nExit: ${String(bundle.validation.exitCode)}\nTimed out: ${bundle.validation.timedOut}\nCanceled: ${bundle.validation.canceled}\n${bundle.validation.output}`,
-          '',
-          'WORKSPACE DELTA',
-          bundle.diff || '(No owned-path content delta detected.)',
+          `Unauthorized: ${bundle.unauthorizedChanges.length ? bundle.unauthorizedChanges.join(', ') : '(none)'}`,
+          `Forbidden: ${bundle.forbiddenChanges.length ? bundle.forbiddenChanges.join(', ') : '(none)'}`,
+          `Pre-existing outside-scope modified: ${bundle.preExistingOutsideScopeModified.length ? bundle.preExistingOutsideScopeModified.join(', ') : '(none)'}`,
+          `Validation: ${validationSummary}`,
+          `Diff included: ${bundle.diffIncluded ? 'yes' : 'no'}`,
         ];
+        if (bundle.validation.output) {
+          lines.push('', 'VALIDATION FAILURE TAIL', bundle.validation.output);
+        }
+        if (bundle.diffIncluded) {
+          lines.push('', 'WORKSPACE DELTA', bundle.diff || '(No owned-path content delta detected.)');
+        }
         return {
           content: [{ type: 'text', text: lines.join('\n') }],
           structuredContent: {
@@ -715,16 +780,23 @@ async function createServer(): Promise<McpServer> {
             planId,
             workerId: state.workerId,
             mechanicalStatus: bundle.mechanicalStatus,
+            workerFailureKind,
+            workerRetryable,
+            hasOwnedDelta,
             changedFiles: bundle.changedFiles,
             unauthorizedChanges: bundle.unauthorizedChanges,
             forbiddenChanges: bundle.forbiddenChanges,
             preExistingOutsideScopeModified: bundle.preExistingOutsideScopeModified,
+            diffIncluded: bundle.diffIncluded,
             diffTruncated: bundle.diffTruncated,
             diffIncomplete: bundle.diffIncomplete,
             validationSkipped: bundle.validation.skipped,
+            validationSkippedReason: bundle.validation.skippedReason,
             validationExitCode: bundle.validation.exitCode,
             validationTimedOut: bundle.validation.timedOut,
             validationCanceled: bundle.validation.canceled,
+            validationOutputTruncated: bundle.validation.outputTruncated,
+            validationLaunchError: bundle.validation.launchError,
           },
           isError: false,
         };
