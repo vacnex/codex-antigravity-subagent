@@ -46,6 +46,12 @@ try {
     /BLUEPRINT_INVALID: PLAN-01 Forbidden scope must contain workspace-relative paths only/,
   );
 
+  const proseForbidden = canonical().replace('- `forbidden.txt`', '- Generated EDMX, entity and database model');
+  assert.throws(
+    () => blueprint.parseBlueprint(proseForbidden),
+    /BLUEPRINT_INVALID: Forbidden scope entries must be backtick-wrapped workspace paths, not prose/,
+  );
+
   console.error('Blueprint execution-path regression test passed');
 } finally {
   await rm(tempRoot, { recursive: true, force: true });
