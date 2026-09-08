@@ -46,7 +46,7 @@ assert.match(blueprintSkill, /<!-- AGY_BLUEPRINT:v1:START -->/);
 assert.match(blueprintSkill, /<!-- AGY_BLUEPRINT:v1:END -->/);
 assert.match(blueprintSkill, /#### Required read set/);
 assert.match(blueprintSkill, /External files outside the workspace are \*\*planning evidence only\*\*/);
-assert.match(blueprintSkill, /Forbidden scope contains only concrete files\/directories/);
+assert.match(blueprintSkill, /`Forbidden scope` contains only concrete files\/directories/);
 assert.match(executeSkill, /agy_start_plan/);
 assert.match(executeSkill, /agy_review_plan/);
 assert.match(executeSkill, /findings only/i);
