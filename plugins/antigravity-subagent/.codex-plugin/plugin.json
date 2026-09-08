@@ -1,6 +1,6 @@
 {
   "name": "antigravity-subagent",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "Plan with Codex, execute bounded PLAN tasks with Antigravity, and avoid repeated long handoff output through server-side blueprint capture and prompt construction.",
   "author": {
     "name": "IlleJiViN"
@@ -21,7 +21,7 @@
   "interface": {
     "displayName": "Antigravity Subagent",
     "shortDescription": "Codex-planned, AGY-executed workflows with deep Codex review.",
-    "longDescription": "Adds canonical execution blueprints, server-side PLAN capture/prompt construction, persistent resumable Antigravity workers, deterministic scope/validation evidence, correction routing, recovery, and Codex semantic review while avoiding repeated large PLAN output from Codex.",
+    "longDescription": "Adds canonical execution blueprints, server-side PLAN capture/prompt construction, persistent resumable Antigravity workers, deterministic scope/validation evidence, compact review bundles, retryable PLAN recovery, correction routing, and Codex semantic review while avoiding repeated large PLAN output from Codex.",
     "developerName": "IlleJiViN",
     "websiteURL": "https://github.com/vacnex/codex-antigravity-subagent",
     "category": "Developer Tools",
