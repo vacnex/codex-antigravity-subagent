@@ -32,6 +32,7 @@ export type PlanMechanicalReview = {
   forbiddenChanges: string[];
   preExistingOutsideScopeModified: string[];
   diff: string;
+  diffIncluded: boolean;
   diffTruncated: boolean;
   diffIncomplete: boolean;
 };
@@ -104,13 +105,31 @@ function splitZero(buffer: Buffer): string[] {
   return buffer.toString('utf8').split('\0').filter(Boolean).map(toPosix);
 }
 
+async function gitRoot(cwd: string): Promise<string> {
+  const value = (await runGit(cwd, ['rev-parse', '--show-toplevel'])).toString('utf8').trim();
+  if (!value) throw new Error(`Could not resolve Git root for workspace: ${cwd}`);
+  return path.resolve(value);
+}
+
+/**
+ * Git reports paths relative to the repository root even when `git -C` points at a nested
+ * workspace. Mechanical PLAN scopes, however, are workspace-relative. Convert every Git path
+ * back to the workspace coordinate system. Paths outside the workspace intentionally remain
+ * `../...` so new sibling-repository changes are still detected as unauthorized instead of
+ * disappearing from the review.
+ */
 export async function gitChangedPaths(cwd: string): Promise<string[]> {
+  const resolvedCwd = path.resolve(cwd);
+  const root = await gitRoot(resolvedCwd);
   const groups = await Promise.all([
-    runGit(cwd, ['diff', '--name-only', '-z']),
-    runGit(cwd, ['diff', '--cached', '--name-only', '-z']),
-    runGit(cwd, ['ls-files', '--others', '--exclude-standard', '-z']),
+    runGit(resolvedCwd, ['diff', '--name-only', '-z']),
+    runGit(resolvedCwd, ['diff', '--cached', '--name-only', '-z']),
+    runGit(resolvedCwd, ['ls-files', '--others', '--exclude-standard', '-z']),
   ]);
-  return [...new Set(groups.flatMap(splitZero))].sort();
+  const repoRelative = [...new Set(groups.flatMap(splitZero))];
+  return repoRelative
+    .map((entry) => toPosix(path.relative(resolvedCwd, path.resolve(root, ...entry.split('/')))) || '.')
+    .sort();
 }
 
 function scopeEntryMatches(relativePath: string, scopeEntry: string): boolean {
@@ -188,7 +207,7 @@ export async function capturePlanBaseline(
 
   const dirtyPaths: Record<string, string> = {};
   for (const relative of await gitChangedPaths(resolvedCwd)) {
-    const absolute = path.join(resolvedCwd, ...relative.split('/'));
+    const absolute = path.resolve(resolvedCwd, ...relative.split('/'));
     dirtyPaths[relative] = await fileHash(absolute);
   }
 
@@ -258,6 +277,7 @@ export async function reviewPlanBaseline(
   plan: BlueprintPlan,
   baselineDir: string,
   baselineId: string,
+  includeDiff = true,
 ): Promise<PlanMechanicalReview> {
   const baseline = await loadPlanBaseline(baselineDir, baselineId);
   const resolvedCwd = path.resolve(cwd);
@@ -279,14 +299,14 @@ export async function reviewPlanBaseline(
 
   for (const [relative, beforeHash] of Object.entries(baseline.dirtyPaths)) {
     if (!currentDirtySet.has(relative) && beforeHash !== '<missing>') {
-      const nowHash = await fileHash(path.join(resolvedCwd, ...relative.split('/')));
+      const nowHash = await fileHash(path.resolve(resolvedCwd, ...relative.split('/')));
       if (nowHash !== beforeHash && !pathInScopes(relative, baseline.writeScope)) {
         preExistingOutsideModified.add(relative);
         unauthorized.add(relative);
       }
       continue;
     }
-    const nowHash = await fileHash(path.join(resolvedCwd, ...relative.split('/')));
+    const nowHash = await fileHash(path.resolve(resolvedCwd, ...relative.split('/')));
     if (nowHash !== beforeHash && !pathInScopes(relative, baseline.writeScope)) {
       preExistingOutsideModified.add(relative);
       unauthorized.add(relative);
@@ -308,13 +328,15 @@ export async function reviewPlanBaseline(
     if (currentHash === beforeHash) continue;
     changedFiles.push(relative);
     if (pathInScopes(relative, baseline.forbiddenScope)) forbidden.add(relative);
-    const pair = await diffPair(snapshotRoot, resolvedCwd, relative, entry);
-    diff += pair.text;
-    diffIncomplete ||= pair.incomplete;
+    if (includeDiff) {
+      const pair = await diffPair(snapshotRoot, resolvedCwd, relative, entry);
+      diff += pair.text;
+      diffIncomplete ||= pair.incomplete;
+    }
   }
 
   let diffTruncated = false;
-  if (Buffer.byteLength(diff, 'utf8') > DIFF_OUTPUT_LIMIT) {
+  if (includeDiff && Buffer.byteLength(diff, 'utf8') > DIFF_OUTPUT_LIMIT) {
     diff = Buffer.from(diff, 'utf8').subarray(0, DIFF_OUTPUT_LIMIT).toString('utf8');
     diff += '\n[Diff truncated by MCP review limit; inspect listed files directly for complete semantic review.]\n';
     diffTruncated = true;
@@ -326,6 +348,7 @@ export async function reviewPlanBaseline(
     forbiddenChanges: [...forbidden].sort(),
     preExistingOutsideScopeModified: [...preExistingOutsideModified].sort(),
     diff,
+    diffIncluded: includeDiff,
     diffTruncated,
     diffIncomplete,
   };
