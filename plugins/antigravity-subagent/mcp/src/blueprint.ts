@@ -87,22 +87,24 @@ function stripTicks(value: string): string {
   return trimmed;
 }
 
-function parsePathItem(value: string): { path: string; note?: string } {
+function parseExecutionPathItem(value: string, section: string): { path: string; note?: string } {
   const backtick = value.match(/^`([^`]+)`(?:\s*(?:—|-)\s*(.+))?$/);
-  if (backtick) {
-    return { path: backtick[1].trim(), note: backtick[2]?.trim() || undefined };
+  if (!backtick) {
+    throw new Error(
+      `BLUEPRINT_INVALID: ${section} entries must be backtick-wrapped workspace paths, not prose; received ${value}. Put semantic prohibitions/requirements in the semantic PLAN sections.`,
+    );
   }
-  const split = value.match(/^(.+?)\s+(?:—|-)\s+(.+)$/);
-  if (split) return { path: stripTicks(split[1]), note: split[2].trim() };
-  return { path: stripTicks(value) };
+  return { path: backtick[1].trim(), note: backtick[2]?.trim() || undefined };
 }
 
-function parsePaths(section: string): string[] {
-  return bulletValues(section).map((entry) => parsePathItem(entry).path).filter(Boolean);
+function parsePaths(section: string, label: string): string[] {
+  return bulletValues(section).map((entry) => parseExecutionPathItem(entry, label).path).filter(Boolean);
 }
 
 function parseReadRefs(section: string): BlueprintReadRef[] {
-  return bulletValues(section).map(parsePathItem).filter((entry) => Boolean(entry.path));
+  return bulletValues(section)
+    .map((entry) => parseExecutionPathItem(entry, 'Required read set'))
+    .filter((entry) => Boolean(entry.path));
 }
 
 function parseDependsOn(section: string): string[] {
@@ -205,8 +207,8 @@ export function parseBlueprint(canonicalText: string): ExecutionBlueprint {
       title,
       dependsOn: parseDependsOn(getSection(rawMarkdown, 'Depends on')),
       goal: getSection(rawMarkdown, 'Goal'),
-      writeScope: parsePaths(getSection(rawMarkdown, 'Write scope')),
-      forbiddenScope: parsePaths(getSection(rawMarkdown, 'Forbidden scope')),
+      writeScope: parsePaths(getSection(rawMarkdown, 'Write scope'), 'Write scope'),
+      forbiddenScope: parsePaths(getSection(rawMarkdown, 'Forbidden scope'), 'Forbidden scope'),
       requiredReadSet: parseReadRefs(getSection(rawMarkdown, 'Required read set')),
       requiredConventions: getSection(rawMarkdown, 'Required conventions'),
       requiredChanges: getSection(rawMarkdown, 'Required changes'),
