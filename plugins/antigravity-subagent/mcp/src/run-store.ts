@@ -4,6 +4,8 @@ import path from 'node:path';
 
 import { resolveRunStateDir } from './state-paths.js';
 
+const EMPTY_RUN_CLEANUP_MS = 5 * 60_000;
+
 export type PlanRunState = {
   workerId?: string;
   conversationId?: string;
@@ -99,6 +101,10 @@ export class RunStore {
       plans: {},
     };
     await this.atomicWrite(this.filePath(record.runId), record);
+    const cleanup = setTimeout(() => {
+      void this.deleteRunIfEmpty(record.runId).catch(() => undefined);
+    }, EMPTY_RUN_CLEANUP_MS);
+    cleanup.unref?.();
     return record;
   }
 
