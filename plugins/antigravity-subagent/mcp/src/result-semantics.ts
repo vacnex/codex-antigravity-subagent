@@ -7,6 +7,8 @@ export type ManagedToolResult = {
 export type ManagedFailureKind =
   | 'none'
   | 'agy_response_timeout'
+  | 'logical_plan_stalled'
+  | 'logical_plan_recovery_exhausted'
   | 'agy_error'
   | 'transport_timeout'
   | 'process_exit'
@@ -20,6 +22,12 @@ function text(result: ManagedToolResult): string {
 
 function responseTimeout(value: string): boolean {
   return /timeout waiting for response/i.test(value);
+}
+
+function logicalFailure(value: string): ManagedFailureKind | undefined {
+  if (/LOGICAL_PLAN_STALLED/i.test(value)) return 'logical_plan_stalled';
+  if (/LOGICAL_PLAN_RECOVERY_EXHAUSTED/i.test(value)) return 'logical_plan_recovery_exhausted';
+  return undefined;
 }
 
 function terminalStatus(value: unknown): string | undefined {
@@ -77,10 +85,11 @@ export function normalizeManagedResult<T extends ManagedToolResult>(result: T): 
       data.retryable = false;
       data.reportAvailable = Boolean(text(result));
     } else {
+      const logical = logicalFailure(message);
       const timeout = responseTimeout(message);
-      data.failureKind = timeout ? 'agy_response_timeout' : 'agy_error';
+      data.failureKind = logical ?? (timeout ? 'agy_response_timeout' : 'agy_error');
       data.retryable = true;
-      data.reportAvailable = !timeout && Boolean(text(result));
+      data.reportAvailable = Boolean(logical) || (!timeout && Boolean(text(result)));
     }
     // The MCP call successfully received a terminal AGY envelope. Whether the implementation
     // passed is a separate workspace-audit decision, not an MCP transport error.
@@ -98,15 +107,14 @@ export function normalizeManagedResult<T extends ManagedToolResult>(result: T): 
   }
 
   if (status) {
-    // Persisted results after MCP restart do not retain enough transport detail to prove that a
-    // terminal envelope was received. Preserve the existing error bit but expose the AGY status.
+    const logical = logicalFailure(message);
     data.transportStatus = 'unknown';
     data.agyStatus = status;
     data.failureKind = status === 'SUCCESS'
       ? 'none'
-      : responseTimeout(message) ? 'agy_response_timeout' : 'agy_error';
+      : logical ?? (responseTimeout(message) ? 'agy_response_timeout' : 'agy_error');
     data.retryable = status !== 'SUCCESS';
-    data.reportAvailable = false;
+    data.reportAvailable = Boolean(logical);
     return result;
   }
 
