@@ -17,6 +17,9 @@ export type AgyDriverTurnResult = {
   canceled: boolean;
   stderr: string;
   diagnosticsTruncated: boolean;
+  autoResumeCount?: number;
+  logicalTurnCount?: number;
+  logicalFailureKind?: 'logical_plan_stalled' | 'logical_plan_recovery_exhausted';
 };
 
 export type AgyPersistentDriverOptions = {
@@ -36,6 +39,19 @@ type PendingTurn = {
   onAbort?: () => void;
 };
 
+const MAX_PLAN_AUTO_RESUMES = 4;
+const MAX_LOGICAL_PLAN_WALL_MS = 30 * 60_000;
+const MAX_STAGNANT_RESPONSE_TIMEOUTS = 2;
+const PLAN_PROMPT_PREFIX = /^AGY (?:EXECUTION|CORRECTION|PLAN RECOVERY) POLICY\b/;
+const INTERNAL_PLAN_RESUME_PROMPT = `AGY INTERNAL PLAN CONTINUATION
+
+Continue the same approved PLAN in this existing conversation after the provider stopped returning a response.
+- Inspect and preserve the current workspace state; do not restart completed work.
+- Continue only unfinished requirements from the already-approved PLAN.
+- Do not broaden scope, redesign architecture, or perform repository-wide rediscovery.
+- If the remaining work needs a material decision absent from the approved PLAN, stop and report BLOCKED.
+- Run the approved canonical validation when implementation is complete, then report concisely.`;
+
 function appendTail(
   current: Buffer<ArrayBufferLike>,
   chunk: Buffer<ArrayBufferLike>,
@@ -44,6 +60,30 @@ function appendTail(
   const combined = Buffer.concat([current, chunk]);
   if (combined.length <= maxBytes) return { buffer: combined, truncated: false };
   return { buffer: combined.subarray(combined.length - maxBytes), truncated: true };
+}
+
+function isAgyResponseTimeout(result: AgyDriverTurnResult): boolean {
+  const event = result.result;
+  if (result.timedOut || result.canceled || !event || event.status === 'SUCCESS') return false;
+  return /timeout waiting for response/i.test([event.response, event.error].filter(Boolean).join('\n'));
+}
+
+function withLogicalFailure(
+  result: AgyDriverTurnResult,
+  kind: 'logical_plan_stalled' | 'logical_plan_recovery_exhausted',
+  autoResumeCount: number,
+  logicalTurnCount: number,
+): AgyDriverTurnResult {
+  const message = kind === 'logical_plan_stalled'
+    ? `LOGICAL_PLAN_STALLED: AGY returned repeated response timeouts without meaningful stream progress after ${logicalTurnCount} logical turns.`
+    : `LOGICAL_PLAN_RECOVERY_EXHAUSTED: AGY response-timeout recovery stopped after ${autoResumeCount} automatic resumes / ${logicalTurnCount} logical turns.`;
+  return {
+    ...result,
+    result: result.result ? { ...result.result, error: message } : result.result,
+    autoResumeCount,
+    logicalTurnCount,
+    logicalFailureKind: kind,
+  };
 }
 
 export function buildAgyStreamUserMessage(prompt: string): string {
@@ -70,6 +110,7 @@ export class AgyPersistentDriver {
   private closed = false;
   private exitCode: number | null | undefined;
   private lastActivity = Date.now();
+  private progressSequence = 0;
 
   constructor(options: AgyPersistentDriverOptions) {
     this.maxDiagnosticBytes = options.maxDiagnosticBytes ?? 8 * 1024;
@@ -86,8 +127,6 @@ export class AgyPersistentDriver {
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 
-    // A warm worker must not keep an MCP stdio server alive after its parent connection closes.
-    // The parent exit hook still terminates the child so it does not become an orphan process.
     this.child.unref();
     (this.child.stdin as unknown as { unref?: () => void }).unref?.();
     (this.child.stdout as unknown as { unref?: () => void }).unref?.();
@@ -160,6 +199,43 @@ export class AgyPersistentDriver {
   }
 
   async send(prompt: string, timeoutMs: number, signal?: AbortSignal): Promise<AgyDriverTurnResult> {
+    if (!PLAN_PROMPT_PREFIX.test(prompt.trimStart())) return this.sendOnce(prompt, timeoutMs, signal);
+
+    const logicalStartedAt = Date.now();
+    let currentPrompt = prompt;
+    let autoResumeCount = 0;
+    let logicalTurnCount = 0;
+    let stagnantTimeouts = 0;
+    let progressWatermark = this.progressSequence;
+
+    while (true) {
+      const result = await this.sendOnce(currentPrompt, timeoutMs, signal);
+      logicalTurnCount += 1;
+      if (!isAgyResponseTimeout(result)) {
+        return { ...result, autoResumeCount, logicalTurnCount };
+      }
+
+      const progressed = this.progressSequence > progressWatermark;
+      progressWatermark = this.progressSequence;
+      stagnantTimeouts = progressed ? 0 : stagnantTimeouts + 1;
+
+      if (stagnantTimeouts >= MAX_STAGNANT_RESPONSE_TIMEOUTS) {
+        return withLogicalFailure(result, 'logical_plan_stalled', autoResumeCount, logicalTurnCount);
+      }
+      if (autoResumeCount >= MAX_PLAN_AUTO_RESUMES || Date.now() - logicalStartedAt >= MAX_LOGICAL_PLAN_WALL_MS) {
+        return withLogicalFailure(result, 'logical_plan_recovery_exhausted', autoResumeCount, logicalTurnCount);
+      }
+      if (signal?.aborted) return { ...result, canceled: true, autoResumeCount, logicalTurnCount };
+      if (!this.isAlive) {
+        return withLogicalFailure(result, 'logical_plan_recovery_exhausted', autoResumeCount, logicalTurnCount);
+      }
+
+      autoResumeCount += 1;
+      currentPrompt = INTERNAL_PLAN_RESUME_PROMPT;
+    }
+  }
+
+  private async sendOnce(prompt: string, timeoutMs: number, signal?: AbortSignal): Promise<AgyDriverTurnResult> {
     if (!this.isAlive) throw new Error('Antigravity stream driver is not running.');
     if (this.pending) throw new Error('Antigravity stream driver already has a turn in progress.');
     if (signal?.aborted) {
@@ -245,6 +321,7 @@ export class AgyPersistentDriver {
       this.settleInit(event);
       return;
     }
+    if (event.event === 'step_update') this.progressSequence += 1;
     this.onEvent?.(event);
     if (event.event !== 'result') return;
     this.acceptConversationId(event.conversationId);
