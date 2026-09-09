@@ -28,6 +28,7 @@ const conversationId = 'driver-conversation-1';
 let turns = 0;
 let input = 0;
 let output = 0;
+let planTimeouts = 0;
 console.log(JSON.stringify({ event: 'init', conversation_id: conversationId, init: { cwd: process.cwd(), tools: ['fake_tool'], permission_mode: 'request-review' } }));
 const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
 lines.on('line', async (line) => {
@@ -39,6 +40,15 @@ lines.on('line', async (line) => {
   output += 2;
   if (content === 'slow') await new Promise((resolve) => setTimeout(resolve, 100));
   if (content === 'cancel-me') await new Promise((resolve) => setTimeout(resolve, 10_000));
+
+  const isLogicalPlan = content.startsWith('AGY EXECUTION POLICY') || content.startsWith('AGY INTERNAL PLAN CONTINUATION');
+  if (isLogicalPlan && planTimeouts < 2) {
+    planTimeouts += 1;
+    console.log(JSON.stringify({ event: 'step_update', step_update: { conversation_id: conversationId, step_index: turns, state: 'WORKING', step_type: 'tool', tool_name: 'fake_edit', text_delta: 'progress' } }));
+    console.log(JSON.stringify({ event: 'result', result: { conversation_id: conversationId, status: 'ERROR', response: 'timeout waiting for response', error: 'timeout waiting for response', duration_seconds: turns, num_turns: turns, usage: { input_tokens: input, output_tokens: output, thinking_tokens: 0, cache_read_tokens: 0, total_tokens: input + output } } }));
+    return;
+  }
+
   console.log(JSON.stringify({ event: 'step_update', step_update: { conversation_id: conversationId, step_index: turns, state: 'DONE', step_type: 'agent_response', text_delta: String(content) } }));
   console.log(JSON.stringify({ event: 'result', result: { conversation_id: conversationId, status: 'SUCCESS', response: String(content), duration_seconds: turns, num_turns: turns, usage: { input_tokens: input, output_tokens: output, thinking_tokens: 0, cache_read_tokens: 0, total_tokens: input + output } } }));
 });
@@ -79,6 +89,14 @@ lines.on('line', async (line) => {
   assert.equal(events.filter((event) => event.event === 'result').length, 2);
   assert.equal((await driver.waitForInit(1))?.conversationId, 'driver-conversation-1');
 
+  const logical = await driver.send('AGY EXECUTION POLICY\nImplement PLAN-01.', 2_000);
+  assert.equal(logical.result?.status, 'SUCCESS');
+  assert.equal(logical.autoResumeCount, 2);
+  assert.equal(logical.logicalTurnCount, 3);
+  assert.equal(logical.logicalFailureKind, undefined);
+  assert.equal(driver.currentConversationId, 'driver-conversation-1');
+  assert.equal(driver.pid, pid, 'logical PLAN auto-resume must keep the same persistent driver/conversation');
+
   const slow = driver.send('slow', 2_000);
   assert.equal(driver.isBusy, true);
   await assert.rejects(() => driver.send('overlap', 2_000), /already has a turn in progress/);
@@ -110,6 +128,25 @@ lines.on('line', async (line) => {
   assert.equal(signaled.canceled, true);
   await sleep(100);
   assert.equal(signalDriver.isAlive, false);
+
+  const stalledAgy = path.join(tempDir, 'stalled-agy.mjs');
+  await writeFile(stalledAgy, `
+import { createInterface } from 'node:readline';
+const conversationId = 'stalled-conversation';
+console.log(JSON.stringify({ event: 'init', conversation_id: conversationId, init: { cwd: process.cwd() } }));
+const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
+lines.on('line', () => {
+  console.log(JSON.stringify({ event: 'result', result: { conversation_id: conversationId, status: 'ERROR', response: 'timeout waiting for response', error: 'timeout waiting for response' } }));
+});
+`, 'utf8');
+  const stalledDriver = new AgyPersistentDriver({ command: process.execPath, args: [stalledAgy], cwd: tempDir });
+  assert.equal((await stalledDriver.waitForInit(1_000))?.conversationId, 'stalled-conversation');
+  const stalled = await stalledDriver.send('AGY EXECUTION POLICY\nImplement PLAN-01.', 2_000);
+  assert.equal(stalled.logicalFailureKind, 'logical_plan_stalled');
+  assert.equal(stalled.autoResumeCount, 1);
+  assert.equal(stalled.logicalTurnCount, 2);
+  assert.match(stalled.result?.error ?? '', /LOGICAL_PLAN_STALLED/);
+  await stalledDriver.close();
 
   const neverInit = path.join(tempDir, 'never-init.mjs');
   await writeFile(neverInit, `setTimeout(() => {}, 10_000);`, 'utf8');
