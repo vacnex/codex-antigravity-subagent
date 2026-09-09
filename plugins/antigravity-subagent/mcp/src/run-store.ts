@@ -150,6 +150,13 @@ export class RunStore {
     return run;
   }
 
+  async removePlanState(runId: string, planId: string): Promise<ExecutionRunRecord> {
+    const run = await this.read(runId);
+    delete run.plans[planId];
+    await this.write(run);
+    return run;
+  }
+
   async attachPlanWorker(input: {
     runId: string;
     planId: string;
