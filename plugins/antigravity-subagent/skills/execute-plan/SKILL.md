@@ -80,6 +80,10 @@ agy_start_plan({
 })
 ```
 
+For PLAN-bound work, omit `timeoutSeconds`. The server applies the long PLAN
+deadline. Do not pass short values such as `120`; a worker deadline is not the
+same thing as the passive `agy_wait` interval.
+
 Do **not** generate or pass:
 
 - PLAN text;
@@ -125,10 +129,15 @@ After a PLAN passes, keep its worker open but idle until the final whole-bluepri
 
 After `agy_start_plan` or `agy_followup`:
 
-1. call `agy_wait(workerId)`;
-2. if the passive MCP wait interval ends while the logical PLAN worker is still active, preserve the same worker and call `agy_wait` again;
-3. do not use `agy_status` as routine polling; use it only when lifecycle state is genuinely contradictory/uncertain or after restart;
-4. do not start the next dependent PLAN until the current PLAN has been reviewed and received Codex `PLAN_PASS`.
+1. call exactly one long-poll `agy_wait({ workerId })` with the default interval;
+2. rely on MCP progress notifications while that request is open; they are not intermediate tool results and do not add repeated worker output to Codex context;
+3. if the passive wait interval genuinely ends or the transport is interrupted while the logical PLAN worker is still active, preserve the same worker and call `agy_wait` again; never poll in a short model-driven loop;
+4. do not use `agy_status` as routine polling; use it only when lifecycle state is genuinely contradictory/uncertain or after restart;
+5. do not start the next dependent PLAN until the current PLAN has been reviewed and received Codex `PLAN_PASS`.
+
+The normal PLAN path is therefore one compact `agy_start_plan`, one long-poll
+`agy_wait`, and one compact `agy_review_plan`. A repeated wait is an exception
+for a real transport interruption or a wait interval that actually expired.
 
 A PLAN-bound worker is a **logical worker**, not necessarily one AGY provider turn. MCP may internally resume the same Antigravity conversation when a terminal AGY envelope reports retryable `agy_response_timeout`. Normal Codex orchestration should not see or manually service those provider-response checkpoints. Internal resumes must keep the same worker/conversation/PLAN and remain bounded by MCP safety limits.
 
@@ -199,6 +208,11 @@ agy_followup({
 MCP reconstructs the original approved PLAN and recovery policy server-side. Do not manufacture a fake finding describing an internal timeout, and do not repeat the PLAN text.
 
 If concrete defects exist, use structured findings instead of `resume:true`.
+
+For PLAN corrections, send only concise findings (`file`, optional `symbol`,
+and a focused `problem`). Add `expected` or `rationale` only when they carry a
+decision the server cannot infer. Do not repeat the blueprint, diff,
+validation output, or the correction prompt; MCP reconstructs those parts.
 
 ## 8. Deep Codex semantic review
 

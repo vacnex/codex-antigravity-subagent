@@ -4,7 +4,7 @@ import { access } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import path from 'node:path';
 
-import { McpServer } from '@modelcontextprotocol/server';
+import { McpServer, type ProgressNotification, type ServerContext } from '@modelcontextprotocol/server';
 import { serveStdio } from '@modelcontextprotocol/server/stdio';
 import * as z from 'zod/v4';
 
@@ -16,7 +16,7 @@ import { capturePlanBaseline } from './git-baseline.js';
 import { withAgyProjectLaunch } from './launch-context.js';
 import { resolveLaunchSelection, type LaunchSelectionReady } from './launch-selection.js';
 import { buildCorrectionPrompt, buildInitialPlanPrompt, buildResumePrompt, type ReviewFinding } from './plan-prompt.js';
-import { buildPlanReviewBundle } from './plan-review.js';
+import { buildPlanReviewBundle, preflightCanonicalValidation } from './plan-review.js';
 import {
   discoverAgyProjects,
   projectContainsPath,
@@ -31,8 +31,19 @@ import { WorkerRuntime, type RuntimeToolResult } from './runtime.js';
 const packagePath = path.resolve(path.dirname(process.argv[1] ?? '.'), '..', 'package.json');
 const VERSION = (JSON.parse(readFileSync(packagePath, 'utf8')) as { version: string }).version;
 const WAIT_POLL_MS = 1_000;
+const WAIT_HEARTBEAT_MS = 30_000;
+const WAIT_DEFAULT_SECONDS = 2_000;
+const WAIT_MAX_SECONDS = 2_000;
+const TERMINAL_DIAGNOSTIC_LIMIT = 500;
 const NEW_PROJECT_DISCOVERY_MS = 3_000;
 const NEW_PROJECT_DISCOVERY_POLL_MS = 100;
+
+type WaitProgressState = {
+  lastSignature?: string;
+  lastSequence?: number;
+  lastProgressAt?: string;
+  lastSentAt: number;
+};
 
 function isRunningResult(result: RuntimeToolResult): boolean {
   return result.structuredContent.done === false || result.structuredContent.state === 'running';
@@ -74,19 +85,123 @@ function compactPlanStart(result: RuntimeToolResult, run: ExecutionRunRecord, pl
   return result;
 }
 
+function boundedTerminalDiagnostic(result: RuntimeToolResult): string | undefined {
+  const structured = result.structuredContent;
+  const timeoutKind = typeof structured.timeoutKind === 'string' ? structured.timeoutKind : undefined;
+  const configuredTimeoutSeconds = typeof structured.configuredTimeoutSeconds === 'number'
+    ? structured.configuredTimeoutSeconds
+    : undefined;
+  const timeoutDiagnostic = structured.timedOut === true || timeoutKind
+    ? `Antigravity timed out after ${configuredTimeoutSeconds ?? '?'} seconds (${timeoutKind ?? 'deadline'}).`
+    : undefined;
+  const candidates = [
+    typeof structured.lastError === 'string' ? structured.lastError.trim() : undefined,
+    result.content[0]?.text?.trim(),
+    timeoutDiagnostic,
+  ];
+  const diagnostic = candidates.find((value) => Boolean(value) && value !== '(Antigravity returned no output)');
+  if (!diagnostic) return undefined;
+  return diagnostic.length > TERMINAL_DIAGNOSTIC_LIMIT
+    ? `${diagnostic.slice(0, TERMINAL_DIAGNOSTIC_LIMIT)}...`
+    : diagnostic;
+}
+
 function annotatePlanTerminalRecovery(
   result: RuntimeToolResult,
   binding: { run: ExecutionRunRecord; planId: string } | undefined,
 ): RuntimeToolResult {
-  if (!binding || isRunningResult(result) || result.structuredContent.done !== true || result.structuredContent.retryable !== true) return result;
-  result.structuredContent.recommendedNextAction = 'review_plan';
+  if (!binding || isRunningResult(result) || result.structuredContent.done !== true) return result;
+  const retryable = result.structuredContent.retryable === true;
   const failureKind = typeof result.structuredContent.failureKind === 'string'
     ? result.structuredContent.failureKind
-    : 'retryable_error';
+    : undefined;
+  const status = typeof result.structuredContent.status === 'string' ? result.structuredContent.status : undefined;
+  const failed = retryable
+    || (failureKind !== undefined && failureKind !== 'none')
+    || (status !== undefined && status !== 'SUCCESS')
+    || result.structuredContent.timedOut === true
+    || result.isError === true;
+  const diagnostic = failed ? boundedTerminalDiagnostic(result) : undefined;
+  result.structuredContent.recommendedNextAction = 'review_plan';
   if (result.content[0]) {
-    result.content[0].text = `${binding.planId} turn ended with retryable ${failureKind}. The worker is not running; do not call agy_wait again. Call agy_review_plan before deciding whether to resume or send findings.`;
+    const detail = diagnostic ? ` Diagnostic: ${diagnostic}` : '';
+    result.content[0].text = retryable
+      ? `${binding.planId} ended with a retryable ${failureKind ?? 'error'}. The worker is not running; call agy_review_plan before deciding whether to continue.${detail}`
+      : failed
+        ? `${binding.planId} ended with ${failureKind ?? 'an error'}. Call agy_review_plan to inspect workspace evidence.${detail}`
+        : `${binding.planId} completed. Call agy_review_plan to inspect workspace evidence.`;
   }
   return result;
+}
+
+function progressSnapshot(result: RuntimeToolResult): {
+  sequence: number;
+  stepUpdates: number;
+  toolEvents: number;
+  subagentEvents: number;
+  lastProgressAt?: string;
+  signature: string;
+} {
+  const progress = result.structuredContent.progress;
+  const summary = progress && typeof progress === 'object' ? progress as Record<string, unknown> : {};
+  const stepUpdates = typeof summary.stepUpdates === 'number' ? summary.stepUpdates : 0;
+  const toolEvents = typeof summary.toolEvents === 'number' ? summary.toolEvents : 0;
+  const subagentEvents = typeof summary.subagentEvents === 'number' ? summary.subagentEvents : 0;
+  const lastProgressAt = typeof summary.lastProgressAt === 'string'
+    ? summary.lastProgressAt
+    : typeof result.structuredContent.lastProgressAt === 'string'
+      ? result.structuredContent.lastProgressAt
+      : undefined;
+  return {
+    sequence: stepUpdates,
+    stepUpdates,
+    toolEvents,
+    subagentEvents,
+    lastProgressAt,
+    signature: `${stepUpdates}:${toolEvents}:${subagentEvents}:${lastProgressAt ?? ''}`,
+  };
+}
+
+function getProgressToken(meta: unknown): string | number | undefined {
+  if (!meta || typeof meta !== 'object') return undefined;
+  const value = (meta as Record<string, unknown>).progressToken;
+  return typeof value === 'string' || typeof value === 'number' ? value : undefined;
+}
+
+async function notifyWaitProgress(
+  ctx: ServerContext,
+  workerId: string,
+  result: RuntimeToolResult,
+  token: string | number | undefined,
+  state: WaitProgressState,
+): Promise<void> {
+  if (token === undefined || !isRunningResult(result)) return;
+  const snapshot = progressSnapshot(result);
+  const now = Date.now();
+  const firstSnapshot = state.lastSignature === undefined;
+  const changed = firstSnapshot
+    ? snapshot.sequence > 0 || snapshot.lastProgressAt !== undefined
+    : state.lastSequence !== snapshot.sequence || state.lastProgressAt !== snapshot.lastProgressAt;
+  const heartbeat = now - state.lastSentAt >= WAIT_HEARTBEAT_MS;
+  if (!changed && !heartbeat) return;
+  state.lastSequence = snapshot.sequence;
+  state.lastProgressAt = snapshot.lastProgressAt;
+  state.lastSignature = snapshot.signature;
+  state.lastSentAt = now;
+  result.structuredContent.progressSequence = snapshot.sequence;
+  const notification: ProgressNotification = {
+    method: 'notifications/progress',
+    params: {
+      progressToken: token,
+      progress: snapshot.sequence,
+      message: `${changed ? 'Progress' : 'Heartbeat'}: worker ${workerId} is running; ${snapshot.stepUpdates} step updates, ${snapshot.toolEvents} tool events, ${snapshot.subagentEvents} subagent events. Last progress: ${snapshot.lastProgressAt ?? 'none'}.`,
+    },
+  };
+  try {
+    await ctx.mcpReq.notify(notification);
+  } catch {
+    // Progress is best-effort; a client that cannot receive it must not stop the wait.
+  }
 }
 
 function annotateWaitExit(
@@ -94,17 +209,29 @@ function annotateWaitExit(
   workerId: string,
   reason: 'timeout' | 'canceled',
 ): RuntimeToolResult {
-  describeRunningResult(result, workerId);
-  result.structuredContent.waitTimedOut = reason === 'timeout';
-  result.structuredContent.waitCanceled = reason === 'canceled';
-  result.structuredContent.workerContinues = isRunningResult(result);
-  if (result.content[0] && isRunningResult(result)) {
-    const prefix = reason === 'timeout'
-      ? 'The passive wait interval ended before the worker finished.'
-      : 'The passive wait was canceled by the MCP client.';
-    result.content[0].text = `${prefix} The Antigravity worker was not canceled and continues in the background. ${result.content[0].text}`;
-  }
-  return result;
+  if (!isRunningResult(result)) return result;
+  const snapshot = progressSnapshot(result);
+  const prefix = reason === 'timeout'
+    ? 'The passive wait interval ended before the worker finished.'
+    : 'The MCP client canceled the passive wait.';
+  return {
+    content: [{
+      type: 'text',
+      text: `${prefix} Worker ${workerId} continues running; call agy_wait again when needed.`,
+    }],
+    structuredContent: {
+      workerId,
+      status: 'RUNNING',
+      state: 'running',
+      done: false,
+      resultAvailable: false,
+      waitTimedOut: reason === 'timeout',
+      waitCanceled: reason === 'canceled',
+      workerContinues: true,
+      progressSequence: snapshot.sequence,
+      lastProgressAt: snapshot.lastProgressAt,
+    },
+  };
 }
 
 async function waitDelay(ms: number, signal: AbortSignal): Promise<boolean> {
@@ -127,6 +254,18 @@ function textError(text: string, code?: string): RuntimeToolResult {
   return {
     content: [{ type: 'text', text }],
     structuredContent: code ? { errorCode: code } : {},
+    isError: true,
+  };
+}
+
+function planTimeoutError(requestedTimeoutSeconds: number): RuntimeToolResult {
+  return {
+    content: [{ type: 'text', text: `PLAN-bound worker requires a timeout of at least 900 seconds; received ${requestedTimeoutSeconds} seconds.` }],
+    structuredContent: {
+      errorCode: 'PLAN_TIMEOUT_TOO_SHORT',
+      requestedTimeoutSeconds,
+      minimumTimeoutSeconds: 900,
+    },
     isError: true,
   };
 }
@@ -413,7 +552,7 @@ async function createServer(): Promise<McpServer> {
         runId: z.string().regex(/^run_[A-Za-z0-9-]{8,}$/).optional().describe('Reuse an existing execution run. Omit for the first PLAN so the server captures the current thread blueprint.'),
         cwd: z.string().min(1).optional().describe('Required only when creating the execution run; later PLANs reuse the run workspace.'),
         projectId: z.string().min(1).max(200).optional().describe('Optional first-run Project selection; later PLANs reuse the pinned Project.'),
-        timeoutSeconds: z.number().int().min(1).max(1800).default(900),
+        timeoutSeconds: z.number().int().min(1).max(1800).default(1800),
         agent: z.string().min(1).max(200).optional(),
         model: z.string().min(1).max(200).optional(),
         effort: z.enum(['low', 'medium', 'high']).optional(),
@@ -421,6 +560,7 @@ async function createServer(): Promise<McpServer> {
       annotations: { readOnlyHint: false, openWorldHint: true, destructiveHint: true, idempotentHint: true },
     },
     async ({ planId, runId, cwd, projectId, timeoutSeconds, agent, model, effort }, ctx) => {
+      if (timeoutSeconds < 900) return planTimeoutError(timeoutSeconds);
       let run: ExecutionRunRecord;
       let stored;
       if (runId) {
@@ -461,6 +601,16 @@ async function createServer(): Promise<McpServer> {
         plan = findPlan(stored.blueprint, planId);
       } catch (error) {
         return textError(error instanceof Error ? error.message : String(error), 'PLAN_NOT_FOUND');
+      }
+
+      try {
+        await preflightCanonicalValidation(plan.canonicalValidation);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const code = message.startsWith('VALIDATION_EXECUTABLE_NOT_FOUND')
+          ? 'VALIDATION_EXECUTABLE_NOT_FOUND'
+          : 'VALIDATION_COMMAND_INVALID';
+        return textError(message, code);
       }
 
       const existingState = run.plans[planId];
@@ -599,7 +749,7 @@ async function createServer(): Promise<McpServer> {
         findings: z.array(findingSchema).min(1).max(50).optional().describe('Supervisor findings for a PLAN-bound worker; MCP rebuilds the correction prompt server-side.'),
         resume: z.boolean().optional().describe('Set true only to resume a terminal retryable PLAN-bound worker after reviewing its workspace delta.'),
         idempotencyKey: z.string().min(1).max(200).optional().describe('Stable retry key. PLAN findings/resume derive stable keys automatically when omitted.'),
-        timeoutSeconds: z.number().int().min(1).max(1800).default(900),
+        timeoutSeconds: z.number().int().min(1).max(1800).optional(),
       }),
       annotations: { readOnlyHint: false, openWorldHint: true, destructiveHint: true, idempotentHint: true },
     },
@@ -611,10 +761,15 @@ async function createServer(): Promise<McpServer> {
       let resolvedPrompt = prompt;
       let resolvedKey = idempotencyKey;
       let runBinding: { run: ExecutionRunRecord; planId: string } | undefined;
+      let effectiveTimeoutSeconds = timeoutSeconds ?? 900;
 
       if (findings || resume === true) {
         runBinding = await runStore.findByWorkerId(workerId);
         if (!runBinding) return textError('Structured findings/resume require a PLAN-bound worker.', 'PLAN_WORKER_NOT_FOUND');
+        effectiveTimeoutSeconds = timeoutSeconds ?? 1800;
+        if (effectiveTimeoutSeconds < 900) {
+          return planTimeoutError(effectiveTimeoutSeconds);
+        }
         try {
           const stored = await blueprintStore.read(runBinding.run.blueprintId);
           const plan = findPlan(stored.blueprint, runBinding.planId);
@@ -641,7 +796,7 @@ async function createServer(): Promise<McpServer> {
         workerId,
         prompt: resolvedPrompt!,
         idempotencyKey: resolvedKey,
-        timeoutSeconds,
+        timeoutSeconds: effectiveTimeoutSeconds,
         signal: ctx.mcpReq.signal,
       });
       let decorated = normalizeManagedResult(await decorateProjectMetadata(result, runtime));
@@ -651,6 +806,20 @@ async function createServer(): Promise<McpServer> {
         if (isRunningResult(decorated) && decorated.content[0]) {
           const mode = resume === true ? 'resume' : 'correction';
           decorated.content[0].text = `Started ${mode} for ${runBinding.planId} (worker=${workerId}, run=${runBinding.run.runId}). Use agy_wait.`;
+        }
+        if (!isRunningResult(decorated) && decorated.content[0]) {
+          const failureKind = typeof decorated.structuredContent.failureKind === 'string'
+            ? decorated.structuredContent.failureKind
+            : undefined;
+          const status = typeof decorated.structuredContent.status === 'string' ? decorated.structuredContent.status : undefined;
+          const failed = (failureKind !== undefined && failureKind !== 'none')
+            || (status !== undefined && status !== 'SUCCESS')
+            || decorated.structuredContent.timedOut === true
+            || decorated.isError === true;
+          const diagnostic = failed ? boundedTerminalDiagnostic(decorated) : undefined;
+          decorated.content[0].text = failed
+            ? `${runBinding.planId} follow-up ended with ${failureKind ?? 'an error'}. Call agy_review_plan to inspect workspace evidence.${diagnostic ? ` Diagnostic: ${diagnostic}` : ''}`
+            : `${runBinding.planId} follow-up completed. Call agy_review_plan to inspect workspace evidence.`;
         }
         return decorated;
       }
@@ -662,16 +831,18 @@ async function createServer(): Promise<McpServer> {
   server.registerTool(
     'agy_wait',
     {
-      title: 'Wait for Antigravity Worker',
-      description: 'Passively wait inside MCP for the latest worker turn to finish. Timeout/cancellation of the waiter never cancels the AGY worker.',
+        title: 'Wait for Antigravity Worker',
+        description: 'Passively wait inside MCP for the latest worker turn to finish. Timeout/cancellation of the waiter never cancels the AGY worker.',
       inputSchema: z.object({
         workerId: z.string().min(1),
-        timeoutSeconds: z.number().int().min(1).max(1100).default(900).describe('Maximum passive wait interval; kept below the bundled 1200-second MCP tool timeout'),
+        timeoutSeconds: z.number().int().min(1).max(WAIT_MAX_SECONDS).default(WAIT_DEFAULT_SECONDS).describe('Maximum passive wait interval; the waiter never cancels the worker'),
       }),
       annotations: { readOnlyHint: true, openWorldHint: false, destructiveHint: false, idempotentHint: true },
     },
     async ({ workerId, timeoutSeconds }, ctx) => {
       const deadline = Date.now() + timeoutSeconds * 1000;
+      const progressToken = getProgressToken(ctx.mcpReq._meta);
+      const progressState: WaitProgressState = { lastSentAt: 0 };
       while (true) {
         let result = await runtime.result(workerId);
         if (!isRunningResult(result)) {
@@ -683,6 +854,7 @@ async function createServer(): Promise<McpServer> {
           const normalized = normalizeManagedResult(binding ? attachRunMetadata(result, binding.run, binding.planId) : result);
           return annotatePlanTerminalRecovery(normalized, binding);
         }
+        await notifyWaitProgress(ctx, workerId, result, progressToken, progressState);
         if (ctx.mcpReq.signal.aborted) {
           result = annotateWaitExit(result, workerId, 'canceled');
           result = await decorateProjectMetadata(result, runtime);
@@ -754,15 +926,10 @@ async function createServer(): Promise<McpServer> {
             ? 'PASS (exit=0)'
             : `FAIL (exit=${String(bundle.validation.exitCode)}, timedOut=${bundle.validation.timedOut}, canceled=${bundle.validation.canceled})`;
         const lines = [
-          `PLAN REVIEW: ${planId}`,
-          `Run: ${runId}`,
-          `Mechanical: ${bundle.mechanicalStatus.toUpperCase()}`,
-          `Worker terminal: ${workerFailureKind}${workerRetryable ? ' (retryable)' : ''}`,
-          `Owned delta: ${hasOwnedDelta ? 'yes' : 'no'}`,
-          `Changed files: ${bundle.changedFiles.length ? bundle.changedFiles.join(', ') : '(none)'}`,
-          `Unauthorized: ${bundle.unauthorizedChanges.length ? bundle.unauthorizedChanges.join(', ') : '(none)'}`,
-          `Forbidden: ${bundle.forbiddenChanges.length ? bundle.forbiddenChanges.join(', ') : '(none)'}`,
-          `Pre-existing outside-scope modified: ${bundle.preExistingOutsideScopeModified.length ? bundle.preExistingOutsideScopeModified.join(', ') : '(none)'}`,
+          `${planId} review: ${bundle.mechanicalStatus.toUpperCase()}`,
+          `Worker: ${workerFailureKind}${workerRetryable ? ' (retryable)' : ''}`,
+          `Owned delta: ${hasOwnedDelta ? `${bundle.changedFiles.length} file(s)` : 'none'}`,
+          `Scope findings: ${bundle.unauthorizedChanges.length + bundle.forbiddenChanges.length + bundle.preExistingOutsideScopeModified.length}`,
           `Validation: ${validationSummary}`,
           `Diff included: ${bundle.diffIncluded ? 'yes' : 'no'}`,
         ];

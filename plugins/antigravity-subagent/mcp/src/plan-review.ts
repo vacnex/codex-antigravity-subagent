@@ -1,4 +1,7 @@
 import { spawn } from 'node:child_process';
+import { access } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import path from 'node:path';
 
 import { extractValidationCommand, type BlueprintPlan } from './blueprint.js';
 import { reviewPlanBaseline, type PlanMechanicalReview } from './git-baseline.js';
@@ -27,6 +30,19 @@ export type DirectCommand = {
   executable: string;
   args: string[];
 };
+
+function isAbsoluteExecutable(value: string): boolean {
+  return path.isAbsolute(value) || path.win32.isAbsolute(value) || path.posix.isAbsolute(value);
+}
+
+export function validationEnvironment(
+  platform = process.platform,
+  baseEnvironment: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  const environment = { ...baseEnvironment };
+  if (platform === 'win32' && !environment.OS) environment.OS = 'Windows_NT';
+  return environment;
+}
 
 function assertQuotedWindowsExecutable(trimmed: string): void {
   if (!/^[A-Za-z]:\\/.test(trimmed) || trimmed.startsWith('"')) return;
@@ -110,6 +126,18 @@ export function validationCommandIssue(command: string, _platform = process.plat
   }
 }
 
+export async function preflightCanonicalValidation(section: string): Promise<void> {
+  const command = extractValidationCommand(section);
+  if (!command) return;
+  const launch = parseDirectCommand(command);
+  if (!isAbsoluteExecutable(launch.executable)) return;
+  try {
+    await access(launch.executable, constants.F_OK);
+  } catch {
+    throw new Error(`VALIDATION_EXECUTABLE_NOT_FOUND: canonical validation executable does not exist: ${launch.executable}`);
+  }
+}
+
 async function runValidationCommand(
   cwd: string,
   command: string,
@@ -136,6 +164,7 @@ async function runValidationCommand(
   return await new Promise<ValidationResult>((resolve) => {
     const child = spawn(launch.executable, launch.args, {
       cwd,
+      env: validationEnvironment(),
       windowsHide: true,
       shell: false,
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -204,6 +233,7 @@ export async function buildPlanReviewBundle(input: {
   signal?: AbortSignal;
 }): Promise<PlanReviewBundle> {
   const includeDiff = input.includeDiff === true;
+  await preflightCanonicalValidation(input.plan.canonicalValidation);
   const mechanical = await reviewPlanBaseline(input.cwd, input.plan, input.baselineDir, input.baselineId, includeDiff);
   const command = extractValidationCommand(input.plan.canonicalValidation);
   const validation: ValidationResult = !command

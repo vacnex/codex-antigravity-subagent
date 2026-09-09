@@ -1,16 +1,33 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
+import { build } from 'esbuild';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const serverPath = path.resolve(here, '../dist/server.cjs');
 const protocolOnly = process.argv.includes('--protocol-only');
 const stateDir = await mkdtemp(path.join(os.tmpdir(), 'agy-mcp-smoke-state-'));
+const serverPath = protocolOnly
+  ? path.join(stateDir, 'mcp', 'dist', 'server.cjs')
+  : path.resolve(here, '../dist/server.cjs');
+if (protocolOnly) {
+  await mkdir(path.dirname(serverPath), { recursive: true });
+  await copyFile(path.resolve(here, '../package.json'), path.resolve(path.dirname(serverPath), '../package.json'));
+  await build({
+    entryPoints: [path.resolve(here, '../src/index.ts')],
+    outfile: serverPath,
+    bundle: true,
+    minify: true,
+    platform: 'node',
+    format: 'cjs',
+    target: 'node20',
+    logLevel: 'silent',
+  });
+}
 const childEnv = Object.fromEntries(Object.entries(process.env).filter(([, value]) => typeof value === 'string'));
 childEnv.AGY_MCP_STATE_DIR = stateDir;
 childEnv.AGY_MCP_STATE_ROOT = stateDir;
@@ -70,6 +87,15 @@ async function openClient(label) {
 }
 
 async function assertProtocolSurface(client) {
+  const sourceIndex = await readFile(path.resolve(here, '../src/index.ts'), 'utf8');
+  const mcpConfig = await readFile(path.resolve(here, '../../.mcp.json'), 'utf8');
+  assert.match(sourceIndex, /const WAIT_MAX_SECONDS = 2_000;/);
+  assert.match(sourceIndex, /const WAIT_HEARTBEAT_MS = 30_000;/);
+  assert.match(sourceIndex, /Last progress:/);
+  assert.match(sourceIndex, /boundedTerminalDiagnostic/);
+  assert.match(sourceIndex, /const firstSnapshot = state\.lastSignature === undefined;/);
+  assert.match(sourceIndex, /const changed = firstSnapshot/);
+  assert.match(mcpConfig, /"tool_timeout_sec"\s*:\s*2100/);
   const tools = await client.listTools();
   assert.deepEqual(
     tools.tools.map((tool) => tool.name).sort(),
@@ -108,7 +134,8 @@ async function assertProtocolSurface(client) {
 
   assert.ok(reviewTool.inputSchema.properties?.runId);
   assert.ok(reviewTool.inputSchema.properties?.planId);
-  assert.equal(waitTool.inputSchema.properties?.timeoutSeconds?.maximum, 1100);
+  assert.equal(waitTool.inputSchema.properties?.timeoutSeconds?.maximum, 2000);
+  assert.equal(waitTool.inputSchema.properties?.timeoutSeconds?.default, 2000);
 }
 
 async function waitForResult(client, workerId, expectedText, timeoutMs = 180_000) {

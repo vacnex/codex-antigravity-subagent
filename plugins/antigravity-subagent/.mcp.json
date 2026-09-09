@@ -8,7 +8,7 @@
       "args": [
         "./mcp/dist/server.cjs"
       ],
-      "tool_timeout_sec": 1200
+      "tool_timeout_sec": 2100
     }
   }
 }
