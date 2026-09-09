@@ -24,11 +24,13 @@ try {
 
   await writeFile(fakeAgy, `
 import { createInterface } from 'node:readline';
+import { readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 const conversationId = 'driver-conversation-1';
+const planCounterPath = join(process.cwd(), 'plan-counter.txt');
 let turns = 0;
 let input = 0;
 let output = 0;
-let planTimeouts = 0;
 console.log(JSON.stringify({ event: 'init', conversation_id: conversationId, init: { cwd: process.cwd(), tools: ['fake_tool'], permission_mode: 'request-review' } }));
 const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
 lines.on('line', async (line) => {
@@ -42,11 +44,15 @@ lines.on('line', async (line) => {
   if (content === 'cancel-me') await new Promise((resolve) => setTimeout(resolve, 10_000));
 
   const isLogicalPlan = content.startsWith('AGY EXECUTION POLICY') || content.startsWith('AGY INTERNAL PLAN CONTINUATION');
-  if (isLogicalPlan && planTimeouts < 2) {
-    planTimeouts += 1;
-    console.log(JSON.stringify({ event: 'step_update', step_update: { conversation_id: conversationId, step_index: turns, state: 'WORKING', step_type: 'tool', tool_name: 'fake_edit', text_delta: 'progress' } }));
-    console.log(JSON.stringify({ event: 'result', result: { conversation_id: conversationId, status: 'ERROR', response: 'timeout waiting for response', error: 'timeout waiting for response', duration_seconds: turns, num_turns: turns, usage: { input_tokens: input, output_tokens: output, thinking_tokens: 0, cache_read_tokens: 0, total_tokens: input + output } } }));
-    return;
+  if (isLogicalPlan) {
+    let planTimeouts = 0;
+    try { planTimeouts = Number(readFileSync(planCounterPath, 'utf8')) || 0; } catch {}
+    if (planTimeouts < 2) {
+      writeFileSync(planCounterPath, String(planTimeouts + 1), 'utf8');
+      console.log(JSON.stringify({ event: 'step_update', step_update: { conversation_id: conversationId, step_index: turns, state: 'WORKING', step_type: 'tool', tool_name: 'fake_edit', text_delta: 'progress' } }));
+      console.log(JSON.stringify({ event: 'result', result: { conversation_id: conversationId, status: 'ERROR', response: 'timeout waiting for response', error: 'timeout waiting for response', duration_seconds: turns, num_turns: turns, usage: { input_tokens: input, output_tokens: output, thinking_tokens: 0, cache_read_tokens: 0, total_tokens: input + output } } }));
+      return;
+    }
   }
 
   console.log(JSON.stringify({ event: 'step_update', step_update: { conversation_id: conversationId, step_index: turns, state: 'DONE', step_type: 'agent_response', text_delta: String(content) } }));
@@ -95,7 +101,8 @@ lines.on('line', async (line) => {
   assert.equal(logical.logicalTurnCount, 3);
   assert.equal(logical.logicalFailureKind, undefined);
   assert.equal(driver.currentConversationId, 'driver-conversation-1');
-  assert.equal(driver.pid, pid, 'logical PLAN auto-resume must keep the same persistent driver/conversation');
+  assert.notEqual(driver.pid, pid, 'logical PLAN response-timeout recovery should relaunch the process');
+  assert.equal(events.filter((event) => event.event === 'init').length, 3, 'initial process plus two conversation resumes should each initialize');
 
   const slow = driver.send('slow', 2_000);
   assert.equal(driver.isBusy, true);
@@ -104,7 +111,7 @@ lines.on('line', async (line) => {
   assert.equal(driver.isBusy, false);
   await driver.close();
   assert.equal(driver.isAlive, false);
-  assert.equal(await driver.waitForInit(1), init);
+  assert.equal((await driver.waitForInit(1))?.conversationId, 'driver-conversation-1');
 
   const cancelDriver = new AgyPersistentDriver({ command: process.execPath, args: [fakeAgy], cwd: tempDir });
   assert.equal((await cancelDriver.waitForInit(1_000))?.conversationId, 'driver-conversation-1');
