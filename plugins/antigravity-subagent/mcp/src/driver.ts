@@ -75,14 +75,20 @@ function withLogicalFailure(
   autoResumeCount: number,
   logicalTurnCount: number,
   detail?: string,
+  conversationId?: string,
 ): AgyDriverTurnResult {
   const base = kind === 'logical_plan_stalled'
     ? `LOGICAL_PLAN_STALLED: AGY returned repeated response timeouts without meaningful stream progress after ${logicalTurnCount} logical turns.`
     : `LOGICAL_PLAN_RECOVERY_EXHAUSTED: AGY response-timeout recovery stopped after ${autoResumeCount} automatic resumes / ${logicalTurnCount} logical turns.`;
   const message = detail ? `${base} ${detail}` : base;
+  const event = result.result
+    ? { ...result.result, error: message }
+    : conversationId
+      ? { event: 'result' as const, conversationId, status: 'ERROR', response: '', error: message }
+      : undefined;
   return {
     ...result,
-    result: result.result ? { ...result.result, error: message } : result.result,
+    result: event,
     autoResumeCount,
     logicalTurnCount,
     logicalFailureKind: kind,
@@ -108,12 +114,11 @@ export function buildAgyStreamUserMessage(prompt: string): string {
   return JSON.stringify({ event: 'user', message: { content: prompt } });
 }
 
-/** Owns one logical warm Antigravity conversation and serializes turns over stream-json stdin. */
+/** Owns one logical Antigravity conversation and serializes stream-json turns across process relaunches. */
 export class AgyPersistentDriver {
   private child!: ChildProcessWithoutNullStreams;
   private readonly command: string;
   private readonly initialArgs: string[];
-  private currentArgs: string[];
   private readonly maxDiagnosticBytes: number;
   private readonly onEvent?: (event: AgyStreamEvent) => void;
   private readonly onExit?: (exitCode: number | null) => void;
@@ -137,7 +142,6 @@ export class AgyPersistentDriver {
   constructor(options: AgyPersistentDriverOptions) {
     this.command = options.command;
     this.initialArgs = [...options.args];
-    this.currentArgs = [...options.args];
     this.maxDiagnosticBytes = options.maxDiagnosticBytes ?? 8 * 1024;
     this.onEvent = options.onEvent;
     this.onExit = options.onExit;
@@ -147,7 +151,7 @@ export class AgyPersistentDriver {
     };
     process.once('exit', this.parentExitHandler);
     this.resetInitState();
-    this.spawnChild(this.currentArgs);
+    this.spawnChild(this.initialArgs);
   }
 
   get pid(): number | undefined { return this.child?.pid; }
@@ -167,7 +171,6 @@ export class AgyPersistentDriver {
   }
 
   private spawnChild(args: string[]): void {
-    this.currentArgs = [...args];
     this.closed = false;
     this.exitCode = undefined;
     this.stderrTail = Buffer.alloc(0);
@@ -211,7 +214,10 @@ export class AgyPersistentDriver {
           ));
         }
       }
-      if (!this.suppressedExitNotifications.has(child)) this.onExit?.(exitCode);
+      if (!this.suppressedExitNotifications.has(child)) {
+        process.removeListener('exit', this.parentExitHandler);
+        this.onExit?.(exitCode);
+      }
     });
   }
 
@@ -265,7 +271,7 @@ export class AgyPersistentDriver {
           stderr: this.stderrText(),
           diagnosticsTruncated: this.diagnosticsTruncated,
         };
-        return withLogicalFailure(fallback, 'logical_plan_recovery_exhausted', autoResumeCount, logicalTurnCount, detail);
+        return withLogicalFailure(fallback, 'logical_plan_recovery_exhausted', autoResumeCount, logicalTurnCount, detail, this.conversationId);
       }
       logicalTurnCount += 1;
       if (!isAgyResponseTimeout(result)) {
@@ -277,10 +283,10 @@ export class AgyPersistentDriver {
       stagnantTimeouts = progressed ? 0 : stagnantTimeouts + 1;
 
       if (stagnantTimeouts >= MAX_STAGNANT_RESPONSE_TIMEOUTS) {
-        return withLogicalFailure(result, 'logical_plan_stalled', autoResumeCount, logicalTurnCount);
+        return withLogicalFailure(result, 'logical_plan_stalled', autoResumeCount, logicalTurnCount, undefined, this.conversationId);
       }
       if (autoResumeCount >= MAX_PLAN_AUTO_RESUMES || Date.now() - logicalStartedAt >= MAX_LOGICAL_PLAN_WALL_MS) {
-        return withLogicalFailure(result, 'logical_plan_recovery_exhausted', autoResumeCount, logicalTurnCount);
+        return withLogicalFailure(result, 'logical_plan_recovery_exhausted', autoResumeCount, logicalTurnCount, undefined, this.conversationId);
       }
       if (signal?.aborted) return { ...result, canceled: true, autoResumeCount, logicalTurnCount };
 
@@ -289,7 +295,7 @@ export class AgyPersistentDriver {
         await this.restartForConversation(signal);
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
-        return withLogicalFailure(result, 'logical_plan_recovery_exhausted', autoResumeCount, logicalTurnCount, detail);
+        return withLogicalFailure(result, 'logical_plan_recovery_exhausted', autoResumeCount, logicalTurnCount, detail, this.conversationId);
       }
       currentPrompt = INTERNAL_PLAN_RESUME_PROMPT;
       progressWatermark = this.progressSequence;
@@ -366,7 +372,10 @@ export class AgyPersistentDriver {
   }
 
   async close(graceMs = 2_000): Promise<void> {
-    if (this.closed) return;
+    if (this.closed) {
+      process.removeListener('exit', this.parentExitHandler);
+      return;
+    }
     if (this.pending) throw new Error('Cannot close Antigravity stream driver while a turn is running. Cancel it first.');
     const child = this.child;
     const closePromise = once(child, 'close').then(() => undefined);
@@ -375,9 +384,11 @@ export class AgyPersistentDriver {
       closePromise.then(() => true),
       new Promise<boolean>((resolve) => setTimeout(() => resolve(false), graceMs)),
     ]);
-    if (graceful || this.closed) return;
-    await terminateChildProcess(child, 500);
-    await Promise.race([closePromise, new Promise<void>((resolve) => setTimeout(resolve, 1_000))]);
+    if (!graceful && !this.closed) {
+      await terminateChildProcess(child, 500);
+      await Promise.race([closePromise, new Promise<void>((resolve) => setTimeout(resolve, 1_000))]);
+    }
+    process.removeListener('exit', this.parentExitHandler);
   }
 
   private handleLine(source: ChildProcessWithoutNullStreams, line: string): void {
