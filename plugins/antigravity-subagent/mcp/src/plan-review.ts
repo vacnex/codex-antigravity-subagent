@@ -4,6 +4,7 @@ import { extractValidationCommand, type BlueprintPlan } from './blueprint.js';
 import { reviewPlanBaseline, type PlanMechanicalReview } from './git-baseline.js';
 
 const VALIDATION_FAILURE_OUTPUT_LIMIT = 12 * 1024;
+const SHELL_OPERATOR = /[|&;<>\r\n]/;
 
 export type ValidationResult = {
   command?: string;
@@ -22,22 +23,81 @@ export type PlanReviewBundle = PlanMechanicalReview & {
   mechanicalStatus: 'pass' | 'fail';
 };
 
-export function validationCommandIssue(command: string, platform = process.platform): string | undefined {
-  if (platform !== 'win32') return undefined;
+export type DirectCommand = {
+  executable: string;
+  args: string[];
+};
+
+/**
+ * Parse the intentionally small canonical-validation command language.
+ * It supports ordinary argv plus single/double quoted tokens and rejects shell
+ * operators so validation can always run with shell=false on every platform.
+ */
+export function parseDirectCommand(command: string): DirectCommand {
   const trimmed = command.trim();
-  if (!/^[A-Za-z]:\\/.test(trimmed) || trimmed.startsWith('"')) return undefined;
-  const exeEnd = trimmed.toLowerCase().indexOf('.exe');
-  if (exeEnd < 0) return undefined;
-  const executable = trimmed.slice(0, exeEnd + 4);
-  if (!/\s/.test(executable)) return undefined;
-  return 'VALIDATION_COMMAND_INVALID: Windows executable paths containing spaces must be double-quoted, for example "D:\\Program Files\\tool.exe" args.';
+  if (!trimmed) throw new Error('VALIDATION_COMMAND_INVALID: canonical validation command is empty.');
+
+  const tokens: string[] = [];
+  let token = '';
+  let tokenStarted = false;
+  let quote: '"' | "'" | undefined;
+
+  const pushToken = (): void => {
+    if (!tokenStarted) return;
+    tokens.push(token);
+    token = '';
+    tokenStarted = false;
+  };
+
+  for (let i = 0; i < trimmed.length; i += 1) {
+    const ch = trimmed[i];
+
+    if (quote) {
+      if (ch === quote) {
+        quote = undefined;
+        tokenStarted = true;
+        continue;
+      }
+      if (ch === '\\' && trimmed[i + 1] === quote) {
+        token += quote;
+        tokenStarted = true;
+        i += 1;
+        continue;
+      }
+      token += ch;
+      tokenStarted = true;
+      continue;
+    }
+
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      tokenStarted = true;
+      continue;
+    }
+    if (/\s/.test(ch)) {
+      pushToken();
+      continue;
+    }
+    if (SHELL_OPERATOR.test(ch)) {
+      throw new Error(`VALIDATION_COMMAND_INVALID: shell operator ${JSON.stringify(ch)} is not allowed; use one direct executable command.`);
+    }
+    token += ch;
+    tokenStarted = true;
+  }
+
+  if (quote) throw new Error('VALIDATION_COMMAND_INVALID: canonical validation contains an unterminated quote.');
+  pushToken();
+  if (tokens.length === 0 || !tokens[0]) throw new Error('VALIDATION_COMMAND_INVALID: canonical validation has no executable.');
+  return { executable: tokens[0], args: tokens.slice(1) };
 }
 
-function shellLaunch(command: string): { executable: string; args: string[] } {
-  if (process.platform === 'win32') {
-    return { executable: process.env.ComSpec || 'cmd.exe', args: ['/d', '/s', '/c', command] };
+export function validationCommandIssue(command: string, _platform = process.platform): string | undefined {
+  try {
+    parseDirectCommand(command);
+    return undefined;
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
   }
-  return { executable: '/bin/sh', args: ['-lc', command] };
 }
 
 async function runValidationCommand(
@@ -46,25 +106,28 @@ async function runValidationCommand(
   timeoutSeconds: number,
   signal?: AbortSignal,
 ): Promise<ValidationResult> {
-  const commandIssue = validationCommandIssue(command);
-  if (commandIssue) {
+  let launch: DirectCommand;
+  try {
+    launch = parseDirectCommand(command);
+  } catch (error) {
+    const launchError = error instanceof Error ? error.message : String(error);
     return {
       command,
       skipped: false,
       exitCode: null,
       timedOut: false,
       canceled: false,
-      output: commandIssue,
+      output: launchError,
       outputTruncated: false,
-      launchError: commandIssue,
+      launchError,
     };
   }
 
   return await new Promise<ValidationResult>((resolve) => {
-    const launch = shellLaunch(command);
     const child = spawn(launch.executable, launch.args, {
       cwd,
       windowsHide: true,
+      shell: false,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     let tail = Buffer.alloc(0);
