@@ -42,6 +42,7 @@ type PendingTurn = {
 const MAX_PLAN_AUTO_RESUMES = 4;
 const MAX_LOGICAL_PLAN_WALL_MS = 30 * 60_000;
 const MAX_STAGNANT_RESPONSE_TIMEOUTS = 2;
+const DRIVER_RESTART_INIT_TIMEOUT_MS = 15_000;
 const PLAN_PROMPT_PREFIX = /^AGY (?:EXECUTION|CORRECTION|PLAN RECOVERY) POLICY\b/;
 const INTERNAL_PLAN_RESUME_PROMPT = `AGY INTERNAL PLAN CONTINUATION
 
@@ -73,10 +74,12 @@ function withLogicalFailure(
   kind: 'logical_plan_stalled' | 'logical_plan_recovery_exhausted',
   autoResumeCount: number,
   logicalTurnCount: number,
+  detail?: string,
 ): AgyDriverTurnResult {
-  const message = kind === 'logical_plan_stalled'
+  const base = kind === 'logical_plan_stalled'
     ? `LOGICAL_PLAN_STALLED: AGY returned repeated response timeouts without meaningful stream progress after ${logicalTurnCount} logical turns.`
     : `LOGICAL_PLAN_RECOVERY_EXHAUSTED: AGY response-timeout recovery stopped after ${autoResumeCount} automatic resumes / ${logicalTurnCount} logical turns.`;
+  const message = detail ? `${base} ${detail}` : base;
   return {
     ...result,
     result: result.result ? { ...result.result, error: message } : result.result,
@@ -86,19 +89,37 @@ function withLogicalFailure(
   };
 }
 
+function resumeArgs(args: string[], conversationId: string): string[] {
+  const cleaned: string[] = [];
+  for (let i = 0; i < args.length; i += 1) {
+    const value = args[i];
+    if (value === '--new-project') continue;
+    if (value === '--project' || value === '--conversation') {
+      i += 1;
+      continue;
+    }
+    cleaned.push(value);
+  }
+  cleaned.push('--conversation', conversationId);
+  return cleaned;
+}
+
 export function buildAgyStreamUserMessage(prompt: string): string {
   return JSON.stringify({ event: 'user', message: { content: prompt } });
 }
 
-/** Owns one warm Antigravity stream-json process and serializes turns over stdin. */
+/** Owns one logical warm Antigravity conversation and serializes turns over stream-json stdin. */
 export class AgyPersistentDriver {
-  private readonly child: ChildProcessWithoutNullStreams;
+  private child!: ChildProcessWithoutNullStreams;
+  private readonly command: string;
+  private readonly initialArgs: string[];
+  private currentArgs: string[];
   private readonly maxDiagnosticBytes: number;
   private readonly onEvent?: (event: AgyStreamEvent) => void;
   private readonly onExit?: (exitCode: number | null) => void;
   private readonly expectedCwd: string;
   private readonly parentExitHandler: () => void;
-  private readonly initPromise: Promise<AgyStreamInitEvent | undefined>;
+  private initPromise!: Promise<AgyStreamInitEvent | undefined>;
   private resolveInit!: (event: AgyStreamInitEvent | undefined) => void;
   private initSettled = false;
   private initError?: Error;
@@ -111,64 +132,88 @@ export class AgyPersistentDriver {
   private exitCode: number | null | undefined;
   private lastActivity = Date.now();
   private progressSequence = 0;
+  private readonly suppressedExitNotifications = new WeakSet<ChildProcessWithoutNullStreams>();
 
   constructor(options: AgyPersistentDriverOptions) {
+    this.command = options.command;
+    this.initialArgs = [...options.args];
+    this.currentArgs = [...options.args];
     this.maxDiagnosticBytes = options.maxDiagnosticBytes ?? 8 * 1024;
     this.onEvent = options.onEvent;
     this.onExit = options.onExit;
     this.expectedCwd = options.cwd;
+    this.parentExitHandler = () => {
+      try { this.child?.kill(); } catch { /* parent is already exiting */ }
+    };
+    process.once('exit', this.parentExitHandler);
+    this.resetInitState();
+    this.spawnChild(this.currentArgs);
+  }
+
+  get pid(): number | undefined { return this.child?.pid; }
+  get isAlive(): boolean { return Boolean(this.child) && !this.closed && this.exitCode === undefined; }
+  get isBusy(): boolean { return Boolean(this.pending); }
+  get currentConversationId(): string | undefined { return this.conversationId; }
+  get init(): AgyStreamInitEvent | undefined { return this.initEvent; }
+  get lastActivityAt(): number { return this.lastActivity; }
+
+  private resetInitState(): void {
+    this.initSettled = false;
+    this.initError = undefined;
+    this.initEvent = undefined;
     this.initPromise = new Promise<AgyStreamInitEvent | undefined>((resolve) => {
       this.resolveInit = resolve;
     });
-    this.child = spawn(options.command, options.args, {
-      cwd: options.cwd,
+  }
+
+  private spawnChild(args: string[]): void {
+    this.currentArgs = [...args];
+    this.closed = false;
+    this.exitCode = undefined;
+    this.stderrTail = Buffer.alloc(0);
+    this.diagnosticsTruncated = false;
+    const child = spawn(this.command, args, {
+      cwd: this.expectedCwd,
       env: process.env,
       windowsHide: true,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
+    this.child = child;
+    child.unref();
+    (child.stdin as unknown as { unref?: () => void }).unref?.();
+    (child.stdout as unknown as { unref?: () => void }).unref?.();
+    (child.stderr as unknown as { unref?: () => void }).unref?.();
 
-    this.child.unref();
-    (this.child.stdin as unknown as { unref?: () => void }).unref?.();
-    (this.child.stdout as unknown as { unref?: () => void }).unref?.();
-    (this.child.stderr as unknown as { unref?: () => void }).unref?.();
-    this.parentExitHandler = () => {
-      try { this.child.kill(); } catch { /* parent is already exiting */ }
-    };
-    process.once('exit', this.parentExitHandler);
-
-    const lines = createInterface({ input: this.child.stdout, crlfDelay: Infinity });
-    lines.on('line', (line) => this.handleLine(line));
-    this.child.stderr.on('data', (chunk: Buffer<ArrayBufferLike>) => {
+    const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
+    lines.on('line', (line) => this.handleLine(child, line));
+    child.stderr.on('data', (chunk: Buffer<ArrayBufferLike>) => {
+      if (this.child !== child) return;
       const appended = appendTail(this.stderrTail, chunk, this.maxDiagnosticBytes);
       this.stderrTail = appended.buffer;
       this.diagnosticsTruncated ||= appended.truncated;
     });
-    this.child.on('error', (error) => {
+    child.on('error', (error) => {
+      if (this.child !== child) return;
       this.closed = true;
       this.exitCode = null;
       this.settleInit(undefined);
       this.failPending(new Error(`Antigravity stream process error: ${error.message}`));
     });
-    this.child.on('close', (exitCode) => {
-      process.removeListener('exit', this.parentExitHandler);
-      this.closed = true;
-      this.exitCode = exitCode;
-      this.settleInit(undefined);
-      if (this.pending) {
-        this.failPending(new Error(
-          `Antigravity stream process exited before returning a result (exit ${exitCode ?? 'unknown'}). ${this.stderrText()}`.trim(),
-        ));
+    child.on('close', (exitCode) => {
+      const current = this.child === child;
+      if (current) {
+        this.closed = true;
+        this.exitCode = exitCode;
+        this.settleInit(undefined);
+        if (this.pending) {
+          this.failPending(new Error(
+            `Antigravity stream process exited before returning a result (exit ${exitCode ?? 'unknown'}). ${this.stderrText()}`.trim(),
+          ));
+        }
       }
-      this.onExit?.(exitCode);
+      if (!this.suppressedExitNotifications.has(child)) this.onExit?.(exitCode);
     });
   }
-
-  get pid(): number | undefined { return this.child.pid; }
-  get isAlive(): boolean { return !this.closed && this.exitCode === undefined; }
-  get isBusy(): boolean { return Boolean(this.pending); }
-  get currentConversationId(): string | undefined { return this.conversationId; }
-  get init(): AgyStreamInitEvent | undefined { return this.initEvent; }
-  get lastActivityAt(): number { return this.lastActivity; }
 
   async waitForInit(timeoutMs = 15_000, signal?: AbortSignal): Promise<AgyStreamInitEvent | undefined> {
     if (this.initEvent) return this.initEvent;
@@ -209,7 +254,19 @@ export class AgyPersistentDriver {
     let progressWatermark = this.progressSequence;
 
     while (true) {
-      const result = await this.sendOnce(currentPrompt, timeoutMs, signal);
+      let result: AgyDriverTurnResult;
+      try {
+        result = await this.sendOnce(currentPrompt, timeoutMs, signal);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        const fallback: AgyDriverTurnResult = {
+          timedOut: false,
+          canceled: Boolean(signal?.aborted),
+          stderr: this.stderrText(),
+          diagnosticsTruncated: this.diagnosticsTruncated,
+        };
+        return withLogicalFailure(fallback, 'logical_plan_recovery_exhausted', autoResumeCount, logicalTurnCount, detail);
+      }
       logicalTurnCount += 1;
       if (!isAgyResponseTimeout(result)) {
         return { ...result, autoResumeCount, logicalTurnCount };
@@ -226,12 +283,38 @@ export class AgyPersistentDriver {
         return withLogicalFailure(result, 'logical_plan_recovery_exhausted', autoResumeCount, logicalTurnCount);
       }
       if (signal?.aborted) return { ...result, canceled: true, autoResumeCount, logicalTurnCount };
-      if (!this.isAlive) {
-        return withLogicalFailure(result, 'logical_plan_recovery_exhausted', autoResumeCount, logicalTurnCount);
-      }
 
       autoResumeCount += 1;
+      try {
+        await this.restartForConversation(signal);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        return withLogicalFailure(result, 'logical_plan_recovery_exhausted', autoResumeCount, logicalTurnCount, detail);
+      }
       currentPrompt = INTERNAL_PLAN_RESUME_PROMPT;
+      progressWatermark = this.progressSequence;
+    }
+  }
+
+  private async restartForConversation(signal?: AbortSignal): Promise<void> {
+    const conversationId = this.conversationId;
+    if (!conversationId) throw new Error('Cannot auto-resume PLAN because Antigravity did not provide a conversation id.');
+    const previous = this.child;
+    this.suppressedExitNotifications.add(previous);
+    if (previous && !this.closed) await terminateChildProcess(previous).catch(() => undefined);
+    this.pending = undefined;
+    this.resetInitState();
+    const args = resumeArgs(this.initialArgs, conversationId);
+    this.spawnChild(args);
+    const init = await this.waitForInit(DRIVER_RESTART_INIT_TIMEOUT_MS, signal);
+    if (!init) {
+      const child = this.child;
+      this.suppressedExitNotifications.add(child);
+      await terminateChildProcess(child).catch(() => undefined);
+      throw new Error(`Antigravity conversation ${conversationId} did not reinitialize within ${DRIVER_RESTART_INIT_TIMEOUT_MS}ms.`);
+    }
+    if (init.conversationId !== conversationId) {
+      throw new Error(`Antigravity resumed unexpected conversation ${init.conversationId}; expected ${conversationId}.`);
     }
   }
 
@@ -285,18 +368,20 @@ export class AgyPersistentDriver {
   async close(graceMs = 2_000): Promise<void> {
     if (this.closed) return;
     if (this.pending) throw new Error('Cannot close Antigravity stream driver while a turn is running. Cancel it first.');
-    const closePromise = once(this.child, 'close').then(() => undefined);
-    this.child.stdin.end();
+    const child = this.child;
+    const closePromise = once(child, 'close').then(() => undefined);
+    child.stdin.end();
     const graceful = await Promise.race([
       closePromise.then(() => true),
       new Promise<boolean>((resolve) => setTimeout(() => resolve(false), graceMs)),
     ]);
     if (graceful || this.closed) return;
-    await terminateChildProcess(this.child, 500);
+    await terminateChildProcess(child, 500);
     await Promise.race([closePromise, new Promise<void>((resolve) => setTimeout(resolve, 1_000))]);
   }
 
-  private handleLine(line: string): void {
+  private handleLine(source: ChildProcessWithoutNullStreams, line: string): void {
+    if (this.child !== source) return;
     const event = parseAgyStreamLine(line);
     if (!event) return;
     this.lastActivity = Date.now();
@@ -304,7 +389,7 @@ export class AgyPersistentDriver {
       if (!event.cwd) {
         this.initError = new Error(`Antigravity stream init did not report cwd; expected ${this.expectedCwd}.`);
         this.settleInit(undefined);
-        void terminateChildProcess(this.child);
+        void terminateChildProcess(source);
         return;
       }
       const expected = canonicalProjectPath(this.expectedCwd);
@@ -312,7 +397,7 @@ export class AgyPersistentDriver {
       if (expected !== actual) {
         this.initError = new Error(`Antigravity workspace mismatch: expected ${this.expectedCwd}, got ${event.cwd}.`);
         this.settleInit(undefined);
-        void terminateChildProcess(this.child);
+        void terminateChildProcess(source);
         return;
       }
       this.acceptConversationId(event.conversationId);
