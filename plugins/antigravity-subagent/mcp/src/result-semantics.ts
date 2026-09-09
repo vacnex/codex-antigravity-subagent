@@ -20,8 +20,15 @@ function text(result: ManagedToolResult): string {
   return result.content.map((entry) => entry.text).join('\n').trim();
 }
 
-function responseTimeout(value: string): boolean {
-  return /timeout waiting for response/i.test(value);
+/**
+ * Antigravity can report a response timeout either as an ERROR envelope or as
+ * a SUCCESS envelope containing the partial-output print-timeout marker. Keep
+ * these markers exact so an unrelated timeout in a worker report is not
+ * mistaken for a recoverable provider timeout.
+ */
+export function isAgyResponseTimeoutText(value: string): boolean {
+  return /timeout waiting for response/i.test(value)
+    || /print timeout after[\s\S]*?with turn in progress/i.test(value);
 }
 
 function logicalFailure(value: string): ManagedFailureKind | undefined {
@@ -75,21 +82,29 @@ export function normalizeManagedResult<T extends ManagedToolResult>(result: T): 
   const exitCode = typeof data.exitCode === 'number' ? data.exitCode : undefined;
   const terminalEnvelope = transport === 'stream' || (transport === 'oneshot' && exitCode === 0);
   const message = [text(result), typeof data.lastError === 'string' ? data.lastError : ''].filter(Boolean).join('\n');
+  const responseTimeout = isAgyResponseTimeoutText(message);
 
   if (terminalEnvelope && status) {
     data.transportStatus = 'ok';
     data.agyStatus = status;
     data.terminalEnvelopeReceived = true;
-    if (status === 'SUCCESS') {
+    const logical = logicalFailure(message);
+    if (responseTimeout) {
+      data.failureKind = 'agy_response_timeout';
+      data.retryable = true;
+      data.reportAvailable = false;
+    } else if (logical) {
+      data.failureKind = logical;
+      data.retryable = true;
+      data.reportAvailable = true;
+    } else if (status === 'SUCCESS') {
       data.failureKind = 'none';
       data.retryable = false;
       data.reportAvailable = Boolean(text(result));
     } else {
-      const logical = logicalFailure(message);
-      const timeout = responseTimeout(message);
-      data.failureKind = logical ?? (timeout ? 'agy_response_timeout' : 'agy_error');
+      data.failureKind = 'agy_error';
       data.retryable = true;
-      data.reportAvailable = Boolean(logical) || (!timeout && Boolean(text(result)));
+      data.reportAvailable = Boolean(logical) || Boolean(text(result));
     }
     // The MCP call successfully received a terminal AGY envelope. Whether the implementation
     // passed is a separate workspace-audit decision, not an MCP transport error.
@@ -110,11 +125,13 @@ export function normalizeManagedResult<T extends ManagedToolResult>(result: T): 
     const logical = logicalFailure(message);
     data.transportStatus = 'unknown';
     data.agyStatus = status;
-    data.failureKind = status === 'SUCCESS'
-      ? 'none'
-      : logical ?? (responseTimeout(message) ? 'agy_response_timeout' : 'agy_error');
-    data.retryable = status !== 'SUCCESS';
-    data.reportAvailable = Boolean(logical);
+    data.failureKind = responseTimeout
+      ? 'agy_response_timeout'
+      : status === 'SUCCESS'
+        ? 'none'
+        : logical ?? 'agy_error';
+    data.retryable = responseTimeout || status !== 'SUCCESS';
+    data.reportAvailable = responseTimeout ? false : Boolean(logical);
     return result;
   }
 

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -13,6 +13,14 @@ const stateDir = path.join(tempDir, 'state');
 try {
   await build({ entryPoints: [path.resolve('src/store.ts')], bundle: true, platform: 'node', format: 'esm', target: 'node20', outfile, logLevel: 'silent' });
   const { WorkerStore, isWorkerLedgerRecord, resolveWorkerStateDir } = await import(pathToFileURL(outfile).href);
+
+  const runtimeSource = await readFile(path.resolve('src/runtime.ts'), 'utf8');
+  const oneShotTurn = runtimeSource.slice(runtimeSource.indexOf('private async finishOneShotTurn'));
+  assert.ok(oneShotTurn.indexOf('const lastError = result.timedOut') >= 0);
+  assert.ok(
+    oneShotTurn.indexOf('const lastError = result.timedOut') < oneShotTurn.indexOf("resultStatus === 'SUCCESS'"),
+    'one-shot timeout must take precedence over SUCCESS when persisting diagnostics',
+  );
 
   assert.equal(resolveWorkerStateDir({ CODEX_HOME: 'D:/codex-home' }, 'D:/home'), path.resolve('D:/codex-home', 'antigravity-subagent', 'workers'));
   assert.equal(resolveWorkerStateDir({ AGY_MCP_STATE_DIR: 'D:/custom-state', CODEX_HOME: 'D:/codex-home' }, 'D:/home'), path.resolve('D:/custom-state'));
@@ -49,6 +57,8 @@ try {
     lastResultStatus: 'RUNNING',
     lastTimedOut: false,
     lastCanceled: false,
+    lastConfiguredTimeoutSeconds: 1800,
+    lastProgressAt: createdAt,
   };
 
   assert.equal(isWorkerLedgerRecord(initial), true);
@@ -73,6 +83,9 @@ try {
     lastTurnUsage: { input_tokens: 180, output_tokens: 35, thinking_tokens: 15, cache_read_tokens: 10, total_tokens: 240 },
     lastTimedOut: false,
     lastCanceled: false,
+    lastTimeoutKind: 'idle',
+    lastConfiguredTimeoutSeconds: 1800,
+    lastProgressAt: '2026-09-04T08:04:30.000Z',
     lastError: undefined,
   };
   await store.write(updated);
@@ -82,6 +95,9 @@ try {
   assert.equal(readUpdated.lastTurnKind, 'start');
   assert.equal(readUpdated.lastTurnKey, 'task-20260904-plan-1');
   assert.equal(readUpdated.lastResultStatus, 'SUCCESS');
+  assert.equal(readUpdated.lastTimeoutKind, 'idle');
+  assert.equal(readUpdated.lastConfiguredTimeoutSeconds, 1800);
+  assert.equal(readUpdated.lastProgressAt, '2026-09-04T08:04:30.000Z');
   assert.equal(readUpdated.agyProjectId, 'project-a');
   assert.deepEqual(readUpdated.agyProjectRoots, ['D:/repo', 'D:/shared']);
   assert.equal(readUpdated.agyWorkspaceAttested, true);
@@ -91,6 +107,7 @@ try {
   assert.equal(isWorkerLedgerRecord({ ...updated, agyProjectRoots: 'D:/repo' }), false);
   assert.equal(isWorkerLedgerRecord({ ...updated, agyProjectResolution: 'guessed' }), false);
   assert.equal(isWorkerLedgerRecord({ ...updated, agyWorkspaceAttested: 'yes' }), false);
+  assert.equal(isWorkerLedgerRecord({ ...updated, lastTimeoutKind: 'unknown' }), false);
 
   const owner1 = 'mcp_owner_1';
   const owner2 = 'mcp_owner_2';

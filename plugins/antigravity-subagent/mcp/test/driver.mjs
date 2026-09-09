@@ -155,6 +155,97 @@ lines.on('line', () => {
   assert.match(stalled.result?.error ?? '', /LOGICAL_PLAN_STALLED/);
   await stalledDriver.close();
 
+  const printTimeoutAgy = path.join(tempDir, 'print-timeout-agy.mjs');
+  const printCounterPath = path.join(tempDir, 'print-timeout-counter.txt');
+  await writeFile(printTimeoutAgy, `
+import { createInterface } from 'node:readline';
+import { readFileSync, writeFileSync } from 'node:fs';
+const conversationId = 'print-timeout-conversation';
+const counterPath = ${JSON.stringify(printCounterPath)};
+console.log(JSON.stringify({ event: 'init', conversation_id: conversationId, init: { cwd: process.cwd() } }));
+const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
+lines.on('line', (line) => {
+  const message = JSON.parse(line);
+  const content = message.message?.content ?? '';
+  if (!content.startsWith('AGY EXECUTION POLICY') && !content.startsWith('AGY INTERNAL PLAN CONTINUATION')) {
+    console.log(JSON.stringify({ event: 'result', result: { conversation_id: conversationId, status: 'SUCCESS', response: content } }));
+    return;
+  }
+  let count = 0;
+  try { count = Number(readFileSync(counterPath, 'utf8')) || 0; } catch {}
+  if (count === 0) {
+    writeFileSync(counterPath, '1', 'utf8');
+    console.log(JSON.stringify({ event: 'step_update', step_update: { conversation_id: conversationId, step_index: 1, state: 'WORKING', step_type: 'tool', tool_name: 'fake_edit' } }));
+    console.log(JSON.stringify({ event: 'result', result: { conversation_id: conversationId, status: 'SUCCESS', response: '[agy] print timeout after 5m0s with turn in progress; returning partial output' } }));
+    return;
+  }
+  console.log(JSON.stringify({ event: 'result', result: { conversation_id: conversationId, status: 'SUCCESS', response: 'PLAN completed after resume' } }));
+});
+`, 'utf8');
+  const printTimeoutDriver = new AgyPersistentDriver({ command: process.execPath, args: [printTimeoutAgy], cwd: tempDir });
+  assert.equal((await printTimeoutDriver.waitForInit(1_000))?.conversationId, 'print-timeout-conversation');
+  const printTimeout = await printTimeoutDriver.send('AGY EXECUTION POLICY\nImplement PLAN-01.', 2_000);
+  assert.equal(printTimeout.result?.status, 'SUCCESS');
+  assert.equal(printTimeout.result?.response, 'PLAN completed after resume');
+  assert.equal(printTimeout.autoResumeCount, 1, 'SUCCESS print-timeout must trigger one conversation resume');
+  assert.equal(printTimeout.logicalTurnCount, 2);
+  await printTimeoutDriver.close();
+
+  const activityAgy = path.join(tempDir, 'activity-agy.mjs');
+  await writeFile(activityAgy, `
+import { createInterface } from 'node:readline';
+const conversationId = 'activity-conversation';
+console.log(JSON.stringify({ event: 'init', conversation_id: conversationId, init: { cwd: process.cwd() } }));
+const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
+lines.on('line', () => {
+  let step = 0;
+  const interval = setInterval(() => {
+    step += 1;
+    console.log(JSON.stringify({ event: 'step_update', step_update: { conversation_id: conversationId, step_index: step, state: 'WORKING', step_type: 'tool' } }));
+    if (step === 4) {
+      clearInterval(interval);
+      console.log(JSON.stringify({ event: 'result', result: { conversation_id: conversationId, status: 'SUCCESS', response: 'completed with activity' } }));
+    }
+  }, 20);
+});
+`, 'utf8');
+  const activityDriver = new AgyPersistentDriver({ command: process.execPath, args: [activityAgy], cwd: tempDir, inactivityTimeoutMs: 50 });
+  assert.equal((await activityDriver.waitForInit(1_000))?.conversationId, 'activity-conversation');
+  const activity = await activityDriver.send('activity', 500);
+  assert.equal(activity.timedOut, false, 'stream activity must reset the inactivity watchdog');
+  assert.equal(activity.result?.response, 'completed with activity');
+  await activityDriver.close();
+
+  const silentAgy = path.join(tempDir, 'silent-agy.mjs');
+  await writeFile(silentAgy, `
+import { createInterface } from 'node:readline';
+const conversationId = 'silent-conversation';
+console.log(JSON.stringify({ event: 'init', conversation_id: conversationId, init: { cwd: process.cwd() } }));
+createInterface({ input: process.stdin, crlfDelay: Infinity });
+setTimeout(() => {}, 10_000);
+`, 'utf8');
+  const idleDriver = new AgyPersistentDriver({ command: process.execPath, args: [silentAgy], cwd: tempDir, inactivityTimeoutMs: 40 });
+  assert.equal((await idleDriver.waitForInit(1_000))?.conversationId, 'silent-conversation');
+  const idle = await idleDriver.send('idle', 500);
+  assert.equal(idle.timedOut, true);
+  assert.equal(idle.timeoutKind, 'idle');
+  await idleDriver.close(100);
+
+  const deadlineAgy = path.join(tempDir, 'deadline-agy.mjs');
+  await writeFile(deadlineAgy, `
+import { createInterface } from 'node:readline';
+const conversationId = 'deadline-conversation';
+console.log(JSON.stringify({ event: 'init', conversation_id: conversationId, init: { cwd: process.cwd() } }));
+const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
+lines.on('line', () => setInterval(() => console.log(JSON.stringify({ event: 'step_update', step_update: { conversation_id: conversationId, state: 'WORKING', step_type: 'tool' } })), 20));
+`, 'utf8');
+  const deadlineDriver = new AgyPersistentDriver({ command: process.execPath, args: [deadlineAgy], cwd: tempDir, inactivityTimeoutMs: 1_000 });
+  assert.equal((await deadlineDriver.waitForInit(1_000))?.conversationId, 'deadline-conversation');
+  const deadline = await deadlineDriver.send('deadline', 100);
+  assert.equal(deadline.timedOut, true);
+  assert.equal(deadline.timeoutKind, 'deadline');
+  await deadlineDriver.close(100);
+
   const neverInit = path.join(tempDir, 'never-init.mjs');
   await writeFile(neverInit, `setTimeout(() => {}, 10_000);`, 'utf8');
   const noInitDriver = new AgyPersistentDriver({ command: process.execPath, args: [neverInit], cwd: tempDir });

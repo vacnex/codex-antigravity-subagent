@@ -9,6 +9,7 @@ export type WorkerLedgerTransport = 'stream' | 'oneshot';
 export type WorkerLifecycleState = 'ready' | 'running' | 'recoverable' | 'closed' | 'error';
 export type WorkerTurnKind = 'start' | 'followup';
 export type WorkerProjectResolution = 'explicit' | 'auto' | 'selected' | 'created';
+export type WorkerTimeoutKind = 'idle' | 'deadline';
 
 export type WorkerLedgerRecord = {
   schemaVersion: 1;
@@ -47,6 +48,9 @@ export type WorkerLedgerRecord = {
   lastTurnUsage?: AgyUsage;
   lastTimedOut?: boolean;
   lastCanceled?: boolean;
+  lastTimeoutKind?: WorkerTimeoutKind;
+  lastConfiguredTimeoutSeconds?: number;
+  lastProgressAt?: string;
   lastError?: string;
 };
 
@@ -105,6 +109,10 @@ function isTurnKind(value: unknown): value is WorkerTurnKind | undefined {
   return value === undefined || value === 'start' || value === 'followup';
 }
 
+function isTimeoutKind(value: unknown): value is WorkerTimeoutKind | undefined {
+  return value === undefined || value === 'idle' || value === 'deadline';
+}
+
 function isProjectResolution(value: unknown): value is WorkerProjectResolution | undefined {
   return value === undefined || value === 'explicit' || value === 'auto' || value === 'selected' || value === 'created';
 }
@@ -136,6 +144,7 @@ export function isWorkerLedgerRecord(value: unknown): value is WorkerLedgerRecor
   if (!optionalNumber(value.lastDurationSeconds) || !optionalNumber(value.lastNumTurns)) return false;
   if (!isUsage(value.lastUsage) || !isUsage(value.lastTurnUsage)) return false;
   if (!optionalBoolean(value.lastTimedOut) || !optionalBoolean(value.lastCanceled)) return false;
+  if (!isTimeoutKind(value.lastTimeoutKind) || !optionalNumber(value.lastConfiguredTimeoutSeconds) || !optionalString(value.lastProgressAt)) return false;
   if (!optionalString(value.lastError)) return false;
   return true;
 }

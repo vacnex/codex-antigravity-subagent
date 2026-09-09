@@ -4,6 +4,7 @@ import { createInterface } from 'node:readline';
 
 import { terminateChildProcess } from './cli.js';
 import { canonicalProjectPath } from './projects.js';
+import { isAgyResponseTimeoutText } from './result-semantics.js';
 import {
   parseAgyStreamLine,
   type AgyStreamEvent,
@@ -11,9 +12,12 @@ import {
   type AgyStreamResultEvent,
 } from './streaming.js';
 
+export type AgyTimeoutKind = 'idle' | 'deadline';
+
 export type AgyDriverTurnResult = {
   result?: AgyStreamResultEvent;
   timedOut: boolean;
+  timeoutKind?: AgyTimeoutKind;
   canceled: boolean;
   stderr: string;
   diagnosticsTruncated: boolean;
@@ -27,6 +31,7 @@ export type AgyPersistentDriverOptions = {
   args: string[];
   cwd: string;
   maxDiagnosticBytes?: number;
+  inactivityTimeoutMs?: number;
   onEvent?: (event: AgyStreamEvent) => void;
   onExit?: (exitCode: number | null) => void;
 };
@@ -34,7 +39,8 @@ export type AgyPersistentDriverOptions = {
 type PendingTurn = {
   resolve: (result: AgyDriverTurnResult) => void;
   reject: (error: Error) => void;
-  timer: NodeJS.Timeout;
+  deadlineTimer: NodeJS.Timeout;
+  inactivityTimer: NodeJS.Timeout;
   signal?: AbortSignal;
   onAbort?: () => void;
 };
@@ -42,6 +48,7 @@ type PendingTurn = {
 const MAX_PLAN_AUTO_RESUMES = 4;
 const MAX_LOGICAL_PLAN_WALL_MS = 30 * 60_000;
 const MAX_STAGNANT_RESPONSE_TIMEOUTS = 2;
+const DEFAULT_INACTIVITY_TIMEOUT_MS = 10 * 60_000;
 const DRIVER_RESTART_INIT_TIMEOUT_MS = 15_000;
 const PLAN_PROMPT_PREFIX = /^AGY (?:EXECUTION|CORRECTION|PLAN RECOVERY) POLICY\b/;
 const INTERNAL_PLAN_RESUME_PROMPT = `AGY INTERNAL PLAN CONTINUATION
@@ -65,8 +72,8 @@ function appendTail(
 
 function isAgyResponseTimeout(result: AgyDriverTurnResult): boolean {
   const event = result.result;
-  if (result.timedOut || result.canceled || !event || event.status === 'SUCCESS') return false;
-  return /timeout waiting for response/i.test([event.response, event.error].filter(Boolean).join('\n'));
+  if (result.timedOut || result.canceled || !event) return false;
+  return isAgyResponseTimeoutText([event.response, event.error].filter(Boolean).join('\n'));
 }
 
 function withLogicalFailure(
@@ -120,6 +127,7 @@ export class AgyPersistentDriver {
   private readonly command: string;
   private readonly initialArgs: string[];
   private readonly maxDiagnosticBytes: number;
+  private readonly inactivityTimeoutMs: number;
   private readonly onEvent?: (event: AgyStreamEvent) => void;
   private readonly onExit?: (exitCode: number | null) => void;
   private readonly expectedCwd: string;
@@ -143,6 +151,9 @@ export class AgyPersistentDriver {
     this.command = options.command;
     this.initialArgs = [...options.args];
     this.maxDiagnosticBytes = options.maxDiagnosticBytes ?? 8 * 1024;
+    this.inactivityTimeoutMs = Number.isFinite(options.inactivityTimeoutMs) && (options.inactivityTimeoutMs ?? 0) > 0
+      ? options.inactivityTimeoutMs!
+      : DEFAULT_INACTIVITY_TIMEOUT_MS;
     this.onEvent = options.onEvent;
     this.onExit = options.onExit;
     this.expectedCwd = options.cwd;
@@ -333,20 +344,18 @@ export class AgyPersistentDriver {
 
     this.lastActivity = Date.now();
     return await new Promise<AgyDriverTurnResult>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        const pending = this.detachPending();
-        if (!pending) return;
-        pending.resolve({
-          timedOut: true,
-          canceled: false,
-          stderr: this.stderrText(),
-          diagnosticsTruncated: this.diagnosticsTruncated,
-        });
-        void terminateChildProcess(this.child);
-      }, timeoutMs);
+      const pending: PendingTurn = {
+        resolve,
+        reject,
+        deadlineTimer: setTimeout(() => { this.timeoutCurrentTurn('deadline'); }, timeoutMs),
+        inactivityTimer: setTimeout(() => { this.timeoutCurrentTurn('idle'); }, Math.min(this.inactivityTimeoutMs, timeoutMs)),
+        signal,
+        onAbort: undefined,
+      };
 
       const onAbort = () => { void this.cancelCurrentTurn(); };
-      this.pending = { resolve, reject, timer, signal, onAbort };
+      pending.onAbort = onAbort;
+      this.pending = pending;
       signal?.addEventListener('abort', onAbort, { once: true });
       const line = `${buildAgyStreamUserMessage(prompt)}\n`;
       this.child.stdin.write(line, 'utf8', (error) => {
@@ -396,6 +405,7 @@ export class AgyPersistentDriver {
     const event = parseAgyStreamLine(line);
     if (!event) return;
     this.lastActivity = Date.now();
+    this.resetInactivityTimer();
     if (event.event === 'init') {
       if (!event.cwd) {
         this.initError = new Error(`Antigravity stream init did not report cwd; expected ${this.expectedCwd}.`);
@@ -452,7 +462,8 @@ export class AgyPersistentDriver {
     const pending = this.pending;
     if (!pending) return undefined;
     this.pending = undefined;
-    clearTimeout(pending.timer);
+    clearTimeout(pending.deadlineTimer);
+    clearTimeout(pending.inactivityTimer);
     if (pending.signal && pending.onAbort) pending.signal.removeEventListener('abort', pending.onAbort);
     return pending;
   }
@@ -460,5 +471,25 @@ export class AgyPersistentDriver {
   private failPending(error: Error): void {
     const pending = this.detachPending();
     if (pending) pending.reject(error);
+  }
+
+  private resetInactivityTimer(): void {
+    const pending = this.pending;
+    if (!pending) return;
+    clearTimeout(pending.inactivityTimer);
+    pending.inactivityTimer = setTimeout(() => { this.timeoutCurrentTurn('idle'); }, this.inactivityTimeoutMs);
+  }
+
+  private timeoutCurrentTurn(timeoutKind: AgyTimeoutKind): void {
+    const pending = this.detachPending();
+    if (!pending) return;
+    pending.resolve({
+      timedOut: true,
+      timeoutKind,
+      canceled: false,
+      stderr: this.stderrText(),
+      diagnosticsTruncated: this.diagnosticsTruncated,
+    });
+    void terminateChildProcess(this.child);
   }
 }

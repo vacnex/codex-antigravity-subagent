@@ -39,6 +39,7 @@ export type RunResult = {
   stdout: string;
   stderr: string;
   timedOut: boolean;
+  timeoutKind?: 'deadline';
   canceled: boolean;
   truncated: boolean;
 };
@@ -50,6 +51,7 @@ export type AgyCapabilities = {
   conversationResume: boolean;
   mode: boolean;
   modelCatalog: boolean;
+  printTimeout: boolean;
 };
 
 export type AgyCapabilityReport = {
@@ -218,6 +220,7 @@ export function runAgy(
         stdout: stdout.toString('utf8'),
         stderr: stderr.toString('utf8'),
         timedOut,
+        ...(timedOut ? { timeoutKind: 'deadline' as const } : {}),
         canceled,
         truncated,
       });
@@ -440,14 +443,7 @@ export async function probeAgyCapabilities(
 
   const report: AgyCapabilityReport = {
     version,
-    capabilities: {
-      jsonOutput: helpText.includes('--output-format'),
-      modelSelection: helpText.includes('--model'),
-      effort: helpText.includes('--effort'),
-      conversationResume: helpText.includes('--conversation'),
-      mode: helpText.includes('--mode'),
-      modelCatalog,
-    },
+    capabilities: { ...detectAgyCliCapabilities(helpText), modelCatalog },
     streaming,
     modelCount,
     baseModelCount,
@@ -455,6 +451,17 @@ export async function probeAgyCapabilities(
   };
   capabilityCache.set(executable, { value: report, expiresAt: Date.now() + CAPABILITY_CACHE_MS });
   return report;
+}
+
+export function detectAgyCliCapabilities(helpText: string): Omit<AgyCapabilities, 'modelCatalog'> {
+  return {
+    jsonOutput: helpText.includes('--output-format'),
+    modelSelection: helpText.includes('--model'),
+    effort: helpText.includes('--effort'),
+    conversationResume: helpText.includes('--conversation'),
+    mode: helpText.includes('--mode'),
+    printTimeout: helpText.includes('--print-timeout'),
+  };
 }
 
 export function appendModelAndEffortArgs(args: string[], model: string, effort: Effort): void {
@@ -553,8 +560,13 @@ export function buildOneShotArgs(
   return args;
 }
 
-export function buildPersistentArgs(worker: WorkerExecutionOptions, conversationId?: string): string[] {
+export function buildPersistentArgs(
+  worker: WorkerExecutionOptions,
+  conversationId?: string,
+  printTimeout?: string,
+): string[] {
   const args = ['--input-format', 'stream-json', '--output-format', 'stream-json', '--mode', worker.mode];
+  if (printTimeout) args.push('--print-timeout', printTimeout);
   appendAgyProjectArgs(args, conversationId);
   appendModelAndEffortArgs(args, worker.model, worker.effort);
   if (worker.agent) args.push('--agent', worker.agent);

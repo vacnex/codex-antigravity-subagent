@@ -12,7 +12,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 try {
   await build({ entryPoints: [path.resolve('src/cli.ts')], bundle: true, platform: 'node', format: 'esm', target: 'node20', outfile, logLevel: 'silent' });
-  const { buildOneShotArgs, runAgy } = await import(pathToFileURL(outfile).href);
+  const { buildOneShotArgs, buildPersistentArgs, detectAgyCliCapabilities, runAgy } = await import(pathToFileURL(outfile).href);
 
   const pinned = buildOneShotArgs('hello', {
     cwd: tempDir,
@@ -30,6 +30,26 @@ try {
   });
   assert.equal(unpinned.includes('--effort'), true);
   assert.equal(unpinned[unpinned.indexOf('--effort') + 1], 'medium');
+
+  const persistent = buildPersistentArgs({
+    cwd: tempDir,
+    mode: 'plan',
+    model: 'claude-example',
+    effort: 'medium',
+  }, undefined, '30m');
+  assert.equal(persistent[persistent.indexOf('--print-timeout') + 1], '30m');
+  assert.equal(buildPersistentArgs({
+    cwd: tempDir,
+    mode: 'plan',
+    model: 'claude-example',
+    effort: 'medium',
+  }).includes('--print-timeout'), false);
+
+  const helpWithPrintTimeout = detectAgyCliCapabilities(
+    '--output-format <format>\n--conversation <id>\n--mode <mode>\n--print-timeout <duration>',
+  );
+  assert.equal(helpWithPrintTimeout.printTimeout, true);
+  assert.equal(detectAgyCliCapabilities('--output-format <format>\n--mode <mode>').printTimeout, false);
 
   const controller = new AbortController();
   const canceledPromise = runAgy(

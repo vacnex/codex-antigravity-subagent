@@ -11,7 +11,10 @@ const outfile = path.join(tempDir, 'result-semantics.mjs');
 
 try {
   await build({ entryPoints: [path.resolve('src/result-semantics.ts')], bundle: true, platform: 'node', format: 'esm', target: 'node20', outfile, logLevel: 'silent' });
-  const { normalizeManagedResult } = await import(pathToFileURL(outfile).href);
+  const { normalizeManagedResult, isAgyResponseTimeoutText } = await import(pathToFileURL(outfile).href);
+
+  assert.equal(isAgyResponseTimeoutText('[agy] print timeout after 5m0s with turn in progress; returning partial output'), true);
+  assert.equal(isAgyResponseTimeoutText('The validation command timed out while building the solution.'), false);
 
   const responseTimeout = normalizeManagedResult({
     content: [{ type: 'text', text: 'timeout waiting for response' }],
@@ -30,6 +33,22 @@ try {
   assert.equal(responseTimeout.structuredContent.failureKind, 'agy_response_timeout');
   assert.equal(responseTimeout.structuredContent.reportAvailable, false);
   assert.equal(responseTimeout.structuredContent.retryable, true);
+
+  const partialSuccess = normalizeManagedResult({
+    content: [{ type: 'text', text: '[agy] print timeout after 5m0s with turn in progress; returning partial output' }],
+    structuredContent: {
+      done: true,
+      transport: 'stream',
+      status: 'SUCCESS',
+      timedOut: false,
+      canceled: false,
+    },
+    isError: false,
+  });
+  assert.equal(partialSuccess.isError, false);
+  assert.equal(partialSuccess.structuredContent.failureKind, 'agy_response_timeout');
+  assert.equal(partialSuccess.structuredContent.retryable, true);
+  assert.equal(partialSuccess.structuredContent.reportAvailable, false);
 
   const success = normalizeManagedResult({
     content: [{ type: 'text', text: 'FINAL_STATUS: PASS' }],

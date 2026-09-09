@@ -63,6 +63,7 @@ type ProgressSummary = {
   stepUpdates: number;
   toolEvents: number;
   subagentEvents: number;
+  lastProgressAt?: string;
 };
 
 type ActiveOneShot = { controller: AbortController };
@@ -342,16 +343,17 @@ export class WorkerRuntime {
         summary.stepUpdates += 1;
         if (event.toolInfo || event.toolName) summary.toolEvents += 1;
         if (event.subagentInfo) summary.subagentEvents += 1;
+        summary.lastProgressAt = new Date().toISOString();
       },
     };
   }
 
-  private createDriver(worker: WorkerState, executable: string, resume: boolean): AgyPersistentDriver {
+  private createDriver(worker: WorkerState, executable: string, resume: boolean, printTimeout?: string): AgyPersistentDriver {
     const progress = this.createProgress();
     let driver!: AgyPersistentDriver;
     driver = new AgyPersistentDriver({
       command: executable,
-      args: buildPersistentArgs(executionOptions(worker), resume ? worker.conversationId : undefined),
+      args: buildPersistentArgs(executionOptions(worker), resume ? worker.conversationId : undefined, printTimeout),
       cwd: worker.cwd,
       onEvent: progress.onEvent,
       onExit: () => queueMicrotask(() => { void this.handleDriverExit(worker.workerId, driver); }),
@@ -382,8 +384,9 @@ export class WorkerRuntime {
     previousUsage?: AgyUsage,
   ): RuntimeToolResult {
     const event = turn.result;
+    const progress = this.progress.get(driver);
     const rawText = turn.timedOut
-      ? `Antigravity timed out after ${timeoutSeconds} seconds.`
+      ? `Antigravity timed out after ${timeoutSeconds} seconds (${turn.timeoutKind ?? 'deadline'}).`
       : turn.canceled
         ? 'Antigravity turn was canceled.'
         : event?.response?.trim() || event?.error?.trim() || turn.stderr || '(Antigravity returned no output)';
@@ -410,12 +413,15 @@ export class WorkerRuntime {
         sessionUsage,
         turnUsage,
         timedOut: turn.timedOut,
+        timeoutKind: turn.timeoutKind,
+        configuredTimeoutSeconds: timeoutSeconds,
         canceled: turn.canceled,
         truncated: turn.diagnosticsTruncated || clipped.truncated,
         transport: 'stream',
         driverPid: driver.pid,
         warm: driver.isAlive,
-        progress: this.progress.get(driver),
+        progress,
+        lastProgressAt: progress?.lastProgressAt,
         background: true,
         done: true,
         resultAvailable: true,
@@ -432,7 +438,7 @@ export class WorkerRuntime {
   ): RuntimeToolResult {
     const envelope = parseAgyEnvelope(result);
     const rawText = result.timedOut
-      ? `Antigravity timed out after ${timeoutSeconds} seconds.`
+      ? `Antigravity timed out after ${timeoutSeconds} seconds (deadline).`
       : result.canceled
         ? 'Antigravity turn was canceled.'
         : envelope?.response?.trim() || envelope?.error?.trim() || result.stderr.trim() || result.stdout.trim() || '(Antigravity returned no output)';
@@ -459,6 +465,8 @@ export class WorkerRuntime {
         turnUsage: usageDelta(sessionUsage, previousUsage),
         exitCode: result.exitCode,
         timedOut: result.timedOut,
+        timeoutKind: result.timeoutKind,
+        configuredTimeoutSeconds: timeoutSeconds,
         canceled: result.canceled,
         truncated: result.truncated || clipped.truncated,
         transport: 'oneshot',
@@ -497,6 +505,7 @@ export class WorkerRuntime {
         activeTurnKind: active?.kind,
         activeTurnKey: active?.key,
         activeTurnStartedAt: active?.startedAt,
+        configuredTimeoutSeconds: active?.timeoutSeconds,
         background: true,
         done: false,
         resultAvailable: false,
@@ -564,6 +573,9 @@ export class WorkerRuntime {
         activeTurnStartedAt: active?.startedAt ?? record.activeTurnStartedAt,
         lastTimedOut: record.lastTimedOut,
         lastCanceled: record.lastCanceled,
+        lastTimeoutKind: record.lastTimeoutKind,
+        lastConfiguredTimeoutSeconds: record.lastConfiguredTimeoutSeconds,
+        lastProgressAt: record.lastProgressAt,
         lastError: record.lastError,
         reused: true,
         duplicateWorkerIds,
@@ -590,9 +602,12 @@ export class WorkerRuntime {
     if (!driver.isAlive) this.drivers.delete(worker.workerId);
 
     const resultStatus = turn.result?.status ?? (turn.canceled ? 'CANCELED' : 'ERROR');
-    const lastError = resultStatus === 'SUCCESS'
-      ? undefined
-      : ((turn.result?.error ?? turn.stderr) || undefined);
+    const lastError = turn.timedOut
+      ? `Antigravity timed out after ${active.timeoutSeconds} seconds (${turn.timeoutKind ?? 'deadline'}).`
+      : resultStatus === 'SUCCESS'
+        ? undefined
+        : ((turn.result?.error ?? turn.stderr) || undefined);
+    const progress = this.progress.get(driver);
     const persistenceError = await this.persist(worker, {
       state: worker.state,
       activeTurnKind: undefined,
@@ -610,6 +625,9 @@ export class WorkerRuntime {
       lastTurnUsage: usageDelta(worker.lastUsage, active.previousUsage),
       lastTimedOut: turn.timedOut,
       lastCanceled: turn.canceled,
+      lastTimeoutKind: turn.timeoutKind,
+      lastConfiguredTimeoutSeconds: active.timeoutSeconds,
+      lastProgressAt: progress?.lastProgressAt,
       lastError,
     });
     this.activeTurns.delete(worker.workerId);
@@ -633,9 +651,11 @@ export class WorkerRuntime {
     worker.state = result.timedOut || result.canceled ? 'recoverable' : 'ready';
     worker.recovered = result.timedOut || result.canceled;
     const resultStatus = envelope?.status ?? (result.canceled ? 'CANCELED' : result.exitCode === 0 ? 'SUCCESS' : 'ERROR');
-    const lastError = resultStatus === 'SUCCESS'
-      ? undefined
-      : ((envelope?.error ?? result.stderr.trim()) || undefined);
+    const lastError = result.timedOut
+      ? `Antigravity timed out after ${active.timeoutSeconds} seconds (deadline).`
+      : resultStatus === 'SUCCESS'
+        ? undefined
+        : ((envelope?.error ?? result.stderr.trim()) || undefined);
     const persistenceError = await this.persist(worker, {
       state: worker.state,
       activeTurnKind: undefined,
@@ -653,6 +673,8 @@ export class WorkerRuntime {
       lastTurnUsage: usageDelta(worker.lastUsage, active.previousUsage),
       lastTimedOut: result.timedOut,
       lastCanceled: result.canceled,
+      lastTimeoutKind: result.timeoutKind,
+      lastConfiguredTimeoutSeconds: active.timeoutSeconds,
       lastError,
     });
     this.activeOneShots.delete(worker.workerId);
@@ -734,7 +756,12 @@ export class WorkerRuntime {
     if (capabilities.streaming.persistentDriver) {
       const leaseError = await this.acquireLease(workerId, true);
       if (leaseError) return textError(`Could not acquire worker lease: ${leaseError}`, { workerId });
-      const driver = this.createDriver(worker, executable, false);
+      const driver = this.createDriver(
+        worker,
+        executable,
+        false,
+        capabilities.capabilities.printTimeout ? '30m' : undefined,
+      );
       this.drivers.set(workerId, driver);
       try {
         const init = await driver.waitForInit(DRIVER_INIT_TIMEOUT_MS, input.signal);
@@ -769,6 +796,7 @@ export class WorkerRuntime {
           lastResultStatus: 'RUNNING',
           lastTimedOut: false,
           lastCanceled: false,
+          lastConfiguredTimeoutSeconds: active.timeoutSeconds,
           lastError: undefined,
         });
         if (persistenceError) {
@@ -889,7 +917,12 @@ export class WorkerRuntime {
 
     try {
       if (!driver && useStream) {
-        driver = this.createDriver(worker, executable, true);
+        driver = this.createDriver(
+          worker,
+          executable,
+          true,
+          capabilities?.capabilities.printTimeout ? '30m' : undefined,
+        );
         this.drivers.set(worker.workerId, driver);
         const init = await driver.waitForInit(DRIVER_INIT_TIMEOUT_MS, input.signal);
         if (!init || input.signal?.aborted) {
@@ -924,6 +957,7 @@ export class WorkerRuntime {
         lastResultStatus: 'RUNNING',
         lastTimedOut: false,
         lastCanceled: false,
+        lastConfiguredTimeoutSeconds: active.timeoutSeconds,
         lastError: undefined,
       });
       if (prePersistError) {
@@ -1062,6 +1096,9 @@ export class WorkerRuntime {
         turnUsage: record.lastTurnUsage,
         lastTimedOut: record.lastTimedOut,
         lastCanceled: record.lastCanceled,
+        lastTimeoutKind: record.lastTimeoutKind,
+        lastConfiguredTimeoutSeconds: record.lastConfiguredTimeoutSeconds,
+        lastProgressAt: record.lastProgressAt,
         lastError: record.lastError,
         background: true,
         done,
@@ -1230,6 +1267,9 @@ export class WorkerRuntime {
         lastTransport: record.lastTransport,
         lastTimedOut: record.lastTimedOut,
         lastCanceled: record.lastCanceled,
+        lastTimeoutKind: record.lastTimeoutKind,
+        lastConfiguredTimeoutSeconds: record.lastConfiguredTimeoutSeconds,
+        lastProgressAt: record.lastProgressAt,
         lastError: record.lastError,
         progress: driver ? this.progress.get(driver) : undefined,
         duplicateWorkerIds: duplicates,
