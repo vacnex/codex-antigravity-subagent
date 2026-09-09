@@ -11,6 +11,12 @@ export type PlanRunState = {
   baselineId?: string;
   startedAt?: string;
   closedAt?: string;
+  logicalStartedAt?: string;
+  autoResumeCount?: number;
+  stagnantResumeCount?: number;
+  lastProgressSteps?: number;
+  lastProgressTools?: number;
+  lastAutoResumeAt?: string;
 };
 
 export type ExecutionRunRecord = {
@@ -137,6 +143,13 @@ export class RunStore {
     return undefined;
   }
 
+  async updatePlanState(runId: string, planId: string, patch: Partial<PlanRunState>): Promise<ExecutionRunRecord> {
+    const run = await this.read(runId);
+    run.plans[planId] = { ...(run.plans[planId] ?? {}), ...patch };
+    await this.write(run);
+    return run;
+  }
+
   async attachPlanWorker(input: {
     runId: string;
     planId: string;
@@ -149,12 +162,17 @@ export class RunStore {
     effort?: string;
   }): Promise<ExecutionRunRecord> {
     const run = await this.read(input.runId);
+    const existing = run.plans[input.planId] ?? {};
     run.plans[input.planId] = {
+      ...existing,
       workerId: input.workerId,
       conversationId: input.conversationId,
       idempotencyKey: input.idempotencyKey,
       baselineId: input.baselineId,
-      startedAt: new Date().toISOString(),
+      startedAt: existing.startedAt ?? new Date().toISOString(),
+      logicalStartedAt: existing.logicalStartedAt ?? new Date().toISOString(),
+      autoResumeCount: existing.autoResumeCount ?? 0,
+      stagnantResumeCount: existing.stagnantResumeCount ?? 0,
     };
     if (input.agyProjectId) run.agyProjectId = input.agyProjectId;
     if (input.model) run.model = input.model;
@@ -174,7 +192,19 @@ export class RunStore {
     return { run: found.run, allClosed: states.length > 0 && states.every((entry) => Boolean(entry.closedAt)) };
   }
 
+  async cleanupPlanBaseline(runId: string, planId: string): Promise<void> {
+    await rm(this.baselineDir(runId, planId), { recursive: true, force: true });
+  }
+
   async cleanupBaselines(runId: string): Promise<void> {
     await rm(path.join(this.runDir(runId), 'baselines'), { recursive: true, force: true });
+  }
+
+  async deleteRunIfEmpty(runId: string): Promise<boolean> {
+    const run = await this.read(runId).catch(() => undefined);
+    if (!run) return false;
+    if (Object.values(run.plans).some((state) => Boolean(state.workerId))) return false;
+    await rm(this.runDir(runId), { recursive: true, force: true });
+    return true;
   }
 }
