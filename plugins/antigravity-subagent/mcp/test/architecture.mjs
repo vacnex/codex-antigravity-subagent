@@ -19,8 +19,9 @@ const planPromptSource = await readFile(path.join(mcpRoot, 'src', 'plan-prompt.t
 const resultSemanticsSource = await readFile(path.join(mcpRoot, 'src', 'result-semantics.ts'), 'utf8');
 const blueprintSkill = await readFile(path.join(pluginRoot, 'skills', 'execution-blueprint', 'SKILL.md'), 'utf8');
 const executeSkill = await readFile(path.join(pluginRoot, 'skills', 'execute-plan', 'SKILL.md'), 'utf8');
+const mcpConfig = await readFile(path.join(pluginRoot, '.mcp.json'), 'utf8');
 
-assert.equal(packageJson.version, '0.5.3');
+assert.equal(packageJson.version, '0.5.4');
 assert.equal(pluginJson.version, packageJson.version, 'plugin and MCP package versions must stay in sync');
 assert.equal(lockJson.version, packageJson.version, 'package-lock root version must stay in sync');
 assert.equal(lockJson.packages?.['']?.version, packageJson.version, 'package-lock root package version must stay in sync');
@@ -103,5 +104,10 @@ assert.match(executeSkill, /normal Codex orchestration should not see or manuall
 assert.match(executeSkill, /not proof that the blueprint's architecture or assumptions were correct/i);
 assert.match(executeSkill, /Retrace the \*\*actual implemented runtime\/effect path\*\*/i);
 assert.doesNotMatch(executeSkill, /agy_start\(\{[\s\S]{0,500}PLAN text/i, 'execute-plan must not instruct Codex to rebuild a PLAN prompt');
+assert.match(indexSource, /WAIT_DEFAULT_SECONDS\s*=\s*2_000/);
+assert.match(indexSource, /WAIT_MAX_SECONDS\s*=\s*2_000/);
+assert.match(indexSource, /notifications\/progress/);
+assert.match(mcpConfig, /"tool_timeout_sec"\s*:\s*2100/);
+assert.doesNotMatch(indexSource, /MCP Tasks|tasks\/get|tasks\/result/i, 'v0.5.4 keeps agy_wait as the completion barrier');
 
 console.error('Architecture regression test passed');

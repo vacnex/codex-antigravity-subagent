@@ -143,7 +143,7 @@ agy_start_plan({
 
 The run pins its workspace, canonical blueprint, Project/model/effort selections, baseline metadata, and worker-to-PLAN mapping. PLAN start acknowledgements include compact `workerId` and `runId` values needed for later control calls.
 
-## Logical PLAN workers in v0.5.3
+## Logical PLAN workers in v0.5.4
 
 A PLAN worker is a logical worker, not necessarily one provider turn.
 
@@ -178,6 +178,12 @@ Automatic recovery is bounded, not infinite:
 - maximum 30 minutes logical PLAN wall time;
 - two consecutive response-timeout turns without stream progress surface `logical_plan_stalled`;
 - hard/non-retryable errors, cancellation, transport timeout, conversation mismatch, or failed resume initialization still surface to the supervisor.
+
+v0.5.4 also detects the `print-timeout` marker even when the AGY envelope says
+`SUCCESS`. This partial output is not treated as completion; MCP continues the
+same conversation before returning a final result to Codex. Workers have two
+separate limits: an inactivity watchdog when no valid stream event arrives and
+an absolute deadline configured by the caller.
 
 `agy_followup({ workerId, resume: true })` remains available for exceptional/manual recovery after a surfaced retryable interruption or restart. It is no longer the normal response to provider `agy_response_timeout`.
 
@@ -273,6 +279,11 @@ agy_followup({
 
 MCP maps the worker back to its run/blueprint/PLAN, reconstructs the original contract plus correction policy, and sends the correction to the existing Antigravity conversation.
 
+In v0.5.4, review and follow-up output stays compact: findings, the blueprint,
+validation stdout, and diffs are not repeated in tool results. Codex enables
+`includeDiff=true` only when the diff is needed; MCP reconstructs the correction
+prompt on the server from the stored run/PLAN.
+
 Manual recovery remains available when automatic logical-worker recovery is exhausted or another retryable lifecycle state is surfaced:
 
 ```text
@@ -286,7 +297,7 @@ Review the existing workspace delta before manual resume. Do not manufacture fak
 
 ## Canonical validation
 
-Canonical validation in v0.5.3 is a **direct executable invocation**, not a shell script. MCP tokenizes the command into executable + argv and calls the process with `shell=false`.
+Canonical validation in v0.5.4 is a **direct executable invocation**, not a shell script. MCP tokenizes the command into executable + argv and calls the process with `shell=false`. Absolute executable paths are checked before the worker starts.
 
 Example:
 
@@ -310,12 +321,19 @@ Persistent AGY workers use `stream-json` when supported. Managed starts/follow-u
 `agy_wait` remains the completion barrier:
 
 ```text
-agy_wait(workerId, timeoutSeconds=900)
+agy_wait(workerId, timeoutSeconds=2000)
 ```
 
-The waiter polls inside MCP, not through repeated Codex model turns. Its maximum interval is 1100 seconds, below the bundled MCP `tool_timeout_sec=1200`.
+For a normal PLAN, Codex keeps one long poll open from start until the worker
+finishes. The waiter polls inside MCP; intermediate snapshots do not become
+tool results for Codex. When the client supports MCP progress notifications,
+MCP sends compact progress/heartbeat updates in the same request. The
+2000-second wait is below the bundled MCP server's `tool_timeout_sec=2100`.
 
-If a passive MCP wait interval expires while the logical worker is still running, the worker continues and can be awaited again. Provider response-timeout recovery happens internally and does not turn a healthy logical PLAN into routine Codex polling.
+If the transport is interrupted or the passive wait interval ends before the
+worker finishes, the worker continues and Codex only calls `agy_wait` again
+when necessary. Provider response-timeout recovery happens inside the logical
+worker and does not turn a healthy PLAN into a short repeated polling loop.
 
 Passed PLAN workers remain open and idle until the final whole-blueprint audit so a cross-PLAN finding can be routed back to the original owning conversation. Close PLAN workers after `BLUEPRINT_PASS`.
 

@@ -1,6 +1,6 @@
 {
   "name": "@illejivin/agy-mcp-server",
-  "version": "0.5.3",
+  "version": "0.5.4",
   "private": true,
   "type": "module",
   "engines": {
@@ -21,7 +21,9 @@
     "test:blueprint-paths": "node test/blueprint-paths.mjs",
     "test:v052-hardening": "node test/v052-hardening.mjs",
     "test:v053-hardening": "node test/v053-hardening.mjs",
-    "test:protocol": "npm run test:streaming && npm run test:cli && npm run test:projects && npm run test:results && npm run test:driver && npm run test:store && npm run test:architecture && npm run test:v05-core && npm run test:blueprint-paths && npm run test:v052-hardening && npm run test:v053-hardening && node test/smoke.mjs --protocol-only",
+    "test:plan-review": "node test/plan-review.mjs",
+    "test:v054-hardening": "node test/v054-hardening.mjs",
+    "test:protocol": "npm run test:streaming && npm run test:cli && npm run test:projects && npm run test:results && npm run test:driver && npm run test:store && npm run test:architecture && npm run test:v05-core && npm run test:blueprint-paths && npm run test:v052-hardening && npm run test:v053-hardening && npm run test:plan-review && npm run test:v054-hardening && node test/smoke.mjs --protocol-only",
     "verify": "npm run check && npm run build && npm run test:protocol"
   },
   "dependencies": {

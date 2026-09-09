@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.4 - 2026-09-09
+
+- Detect false `SUCCESS` results when AGY returns the `print-timeout` marker with partial output; the logical PLAN worker continues the same conversation within bounded recovery limits.
+- Separate worker inactivity timeouts from absolute deadlines, and persist the last timeout metadata and progress timestamp for easier review diagnostics.
+- Make `agy_wait` a 2000-second default long poll, send best-effort progress notifications/heartbeats, and keep internal polling snapshots out of intermediate tool results.
+- Reduce repeated PLAN review/follow-up output, keep diffs opt-in, and reject short PLAN timeouts before a worker starts.
+- Add canonical-validation executable preflight, normalize `OS=Windows_NT` for Windows validation, and add regression coverage for the new contracts.
+
 ## 0.5.3 - 2026-09-09
 
 - Treat PLAN-bound Antigravity work as a logical worker across provider response-timeout checkpoints. Retryable `timeout waiting for response` envelopes are handled inside the persistent driver by relaunching the same Antigravity `conversationId` and continuing the approved PLAN instead of routinely waking Codex for `review → resume → wait` orchestration.

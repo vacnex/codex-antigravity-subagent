@@ -1,6 +1,6 @@
 {
   "name": "antigravity-subagent",
-  "version": "0.5.3",
+  "version": "0.5.4",
   "description": "Plan with Codex, execute bounded PLAN tasks with Antigravity, and avoid repeated long handoff output through server-side blueprint capture and prompt construction.",
   "author": {
     "name": "IlleJiViN"
