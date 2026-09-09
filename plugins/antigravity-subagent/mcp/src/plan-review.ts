@@ -28,6 +28,15 @@ export type DirectCommand = {
   args: string[];
 };
 
+function assertQuotedWindowsExecutable(trimmed: string): void {
+  if (!/^[A-Za-z]:\\/.test(trimmed) || trimmed.startsWith('"')) return;
+  const exeEnd = trimmed.toLowerCase().indexOf('.exe');
+  if (exeEnd < 0) return;
+  const executableCandidate = trimmed.slice(0, exeEnd + 4);
+  if (!/\s/.test(executableCandidate)) return;
+  throw new Error('VALIDATION_COMMAND_INVALID: Windows executable paths containing spaces must be double-quoted, for example "D:\\Program Files\\tool.exe" args.');
+}
+
 /**
  * Parse the intentionally small canonical-validation command language.
  * It supports ordinary argv plus single/double quoted tokens and rejects shell
@@ -36,6 +45,7 @@ export type DirectCommand = {
 export function parseDirectCommand(command: string): DirectCommand {
   const trimmed = command.trim();
   if (!trimmed) throw new Error('VALIDATION_COMMAND_INVALID: canonical validation command is empty.');
+  assertQuotedWindowsExecutable(trimmed);
 
   const tokens: string[] = [];
   let token = '';
