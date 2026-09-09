@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.3 - 2026-09-09
+
+- Treat PLAN-bound Antigravity work as a logical worker across provider response-timeout checkpoints. Retryable `timeout waiting for response` envelopes are handled inside the persistent driver by relaunching the same Antigravity `conversationId` and continuing the approved PLAN instead of routinely waking Codex for `review → resume → wait` orchestration.
+- Bound logical PLAN recovery to four automatic conversation resumes, 30 minutes of logical wall time, and a no-progress stall guard. Two consecutive response-timeout turns without stream progress surface `logical_plan_stalled`; exhausted recovery surfaces `logical_plan_recovery_exhausted`. Standalone `agy_start` workers do not receive PLAN-specific automatic resume behavior.
+- Harden `$execution-blueprint` with a generic end-to-end runtime/effect-path proof for every non-trivial task, plus conditional integration, database/data, UI/state, async/job/event, and security/trust-boundary checks that apply only when repository evidence makes them relevant.
+- Require integration/cross-service planning to resolve the actual configured destination, receiving process/service and route, downstream hops, authentication/token ownership, and a proven sibling flow. A shorter implementation may not silently remove an existing service/proxy/authentication/persistence/trust boundary without authoritative repository evidence.
+- Strengthen `$execute-plan` semantic review so an approved blueprint is treated as AGY's implementation contract rather than proof that its architecture was correct. PLAN and final whole-blueprint review now compare implementation both with the blueprint and independently with repository reality/user intent, retracing the actual runtime/effect path before PASS.
+- Replace shell-based canonical validation with a direct executable + argv parser and `spawn(..., shell=false)`. Shell composition/operators are rejected, quoted Windows executable paths with spaces are handled directly, successful stdout remains suppressed, and failed validation keeps only a bounded tail.
+- Add empty execution-run cleanup for startup/handshake paths that never attach a worker, reducing orphan run/baseline state after failed first starts.
+- Add v0.5.3 regression coverage for direct validation parsing, shell-operator rejection, logical PLAN auto-resume across actual process relaunches, stall detection, logical failure classification, empty-run cleanup, conditional planning invariants, and independent architecture review.
+
 ## 0.5.2 - 2026-09-08
 
 - Normalize Git dirty paths from repository-root coordinates into execution-workspace coordinates, fixing false `Unauthorized changes` when the approved workspace is nested below the Git root while still detecting new or modified sibling paths outside the workspace.
