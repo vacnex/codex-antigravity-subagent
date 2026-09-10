@@ -52,6 +52,20 @@ Do not repeat the marked canonical blueprint later in the same response. These m
 
 Do not call an MCP tool merely to save the blueprint. The user should see the full blueprint directly in chat.
 
+### Plan Mode wrapper
+
+When Plan Mode requires a `<proposed_plan>` response, treat that tag as an outer rendering wrapper only. Keep the canonical blueprint unchanged inside it:
+
+```text
+<proposed_plan>
+<!-- AGY_BLUEPRINT:v1:START -->
+...
+<!-- AGY_BLUEPRINT:v1:END -->
+</proposed_plan>
+```
+
+Inside the markers, this skill's machine-readable schema takes precedence over Plan Mode's optional human-plan layout. Do not replace `### PLAN-01: ...` with an em dash/en dash form, and do not replace any required `####` heading with a plain `Label:` line. Optional summary, interface, or assumption prose may appear before `## Implementation Tasks`, but must not replace canonical fields.
+
 ## 4. Readiness and basis
 
 A canonical blueprint begins with exactly one readiness line:
@@ -101,6 +115,8 @@ Each task must use:
 ```text
 ### PLAN-01: Short objective
 ```
+
+The colon after the PLAN ID is required. `### PLAN-01 — ...`, `### PLAN-01 – ...`, and `### PLAN-01 - ...` are invalid.
 
 PLAN IDs are stable and sequential. Dependencies are explicit. Each PLAN represents one bounded implementation responsibility suitable for one fresh worker.
 
@@ -169,6 +185,7 @@ For `Depends on`, use `None` or list PLAN IDs. For optional empty scopes, use ex
 `Canonical validation` is executed directly by MCP with `shell=false`. It is intentionally a small argv-style command language, not a shell script.
 
 - Use one direct executable command, not prose mixed with a command.
+- Encode it in a fenced block as shown above or on one `Command: <executable and argv>` line. If no direct command is appropriate, use exactly `None`; put the reason in a semantic PLAN section.
 - Quote every executable or argument path that contains whitespace.
 - Shell composition/operators are not allowed: do not use `&&`, `||`, `|`, `;`, redirection, command substitution, or shell-variable expansion. If validation genuinely requires multiple commands or shell state, choose one existing repository test/build entry point that performs those steps or state the limitation in the PLAN instead of embedding a script.
 - On Windows, an absolute executable path containing spaces must be double-quoted, for example:
@@ -270,6 +287,7 @@ Before emitting `Blueprint status: READY`, verify:
 
 - the workspace is correct and absolute;
 - every PLAN has all canonical headings;
+- every PLAN title uses the exact `### PLAN-XX: ...` colon form and every canonical field uses an exact `####` heading, including when `<proposed_plan>` is required;
 - PLAN dependencies reference real PLAN IDs;
 - every Write/Forbidden/Required-read entry is a workspace-relative path and cannot escape the workspace;
 - no external document path appears in any execution path section;

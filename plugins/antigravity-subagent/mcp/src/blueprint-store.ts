@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
-import { assertBlueprintFresh, parseBlueprint, type ExecutionBlueprint } from './blueprint.js';
+import { assertBlueprintFresh, blueprintErrorCode, parseBlueprint, type ExecutionBlueprint } from './blueprint.js';
 import { resolveBlueprintStateDir } from './state-paths.js';
 
 export type BlueprintMetadata = {
@@ -48,6 +48,16 @@ export function blueprintIdFor(blueprint: ExecutionBlueprint): string {
   return `bp_${hash}`;
 }
 
+function parseStoredBlueprint(canonicalText: string): ExecutionBlueprint {
+  try {
+    return parseBlueprint(canonicalText);
+  } catch (error) {
+    if (blueprintErrorCode(error)) throw error;
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`BLUEPRINT_INVALID: ${message}`);
+  }
+}
+
 export class BlueprintStore {
   readonly rootDir: string;
 
@@ -66,7 +76,7 @@ export class BlueprintStore {
   }
 
   async save(canonicalText: string, threadId: string): Promise<StoredBlueprint> {
-    const blueprint = parseBlueprint(canonicalText);
+    const blueprint = parseStoredBlueprint(canonicalText);
     assertBlueprintFresh(blueprint);
     const blueprintId = blueprintIdFor(blueprint);
     const metadata: BlueprintMetadata = {
@@ -90,7 +100,7 @@ export class BlueprintStore {
       readFile(this.markdownPath(blueprintId), 'utf8'),
       readFile(this.metadataPath(blueprintId), 'utf8'),
     ]);
-    const blueprint = parseBlueprint(markdown);
+    const blueprint = parseStoredBlueprint(markdown);
     assertBlueprintFresh(blueprint);
     if (blueprintIdFor(blueprint) !== blueprintId) {
       throw new Error(`Blueprint content hash no longer matches ${blueprintId}.`);

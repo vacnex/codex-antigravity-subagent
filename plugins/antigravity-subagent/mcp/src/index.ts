@@ -10,7 +10,7 @@ import * as z from 'zod/v4';
 
 import { findAgy, probeAgyCapabilities, type Effort } from './cli.js';
 import { BlueprintStore } from './blueprint-store.js';
-import { findPlan, workspaceMatches } from './blueprint.js';
+import { blueprintErrorCode, findPlan, workspaceMatches } from './blueprint.js';
 import { captureLatestBlueprintFromThread } from './codex-transcript.js';
 import { capturePlanBaseline } from './git-baseline.js';
 import { withAgyProjectLaunch } from './launch-context.js';
@@ -589,7 +589,10 @@ async function createServer(): Promise<McpServer> {
           }
           run = await runStore.create({ blueprintId: stored.blueprintId, threadId, cwd: resolvedCwd });
         } catch (error) {
-          return textError(error instanceof Error ? error.message : String(error), 'BLUEPRINT_CAPTURE_UNAVAILABLE');
+          return textError(
+            error instanceof Error ? error.message : String(error),
+            blueprintErrorCode(error) ?? 'BLUEPRINT_CAPTURE_UNAVAILABLE',
+          );
         }
       }
 

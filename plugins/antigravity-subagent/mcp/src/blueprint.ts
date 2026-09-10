@@ -39,6 +39,21 @@ export type ExecutionBlueprint = {
   canonicalText: string;
 };
 
+const REQUIRED_PLAN_SECTIONS = [
+  'Depends on',
+  'Goal',
+  'Write scope',
+  'Forbidden scope',
+  'Required read set',
+  'Required conventions',
+  'Required changes',
+  'Implementation logic',
+  'Failure and boundary behavior',
+  'Acceptance criteria',
+  'Canonical validation',
+  'Stop if',
+] as const;
+
 function normalizeNewlines(text: string): string {
   return text.replace(/\r\n?/g, '\n');
 }
@@ -193,6 +208,11 @@ export function parseBlueprint(canonicalText: string): ExecutionBlueprint {
   const tasksText = canonical.slice(tasksIndex + tasksMarker.length, canonical.indexOf(BLUEPRINT_END_MARKER));
 
   const planPattern = /^###\s+(PLAN-\d{2,}):\s*(.+?)\s*$/gm;
+  const nonCanonicalHeadings = [...tasksText.matchAll(/^###\s+(PLAN-\d{2,})\s+(?:—|–|-)\s+(.+?)\s*$/gm)];
+  if (nonCanonicalHeadings.length > 0) {
+    const headings = nonCanonicalHeadings.map((match) => match[0].trim()).join('; ');
+    throw new Error(`BLUEPRINT_INVALID: Non-canonical PLAN heading(s): ${headings}. Use "### PLAN-XX: <objective>"; the colon is required.`);
+  }
   const matches = [...tasksText.matchAll(planPattern)];
   if (matches.length === 0) throw new Error('Blueprint contains no PLAN-XX tasks.');
 
@@ -202,6 +222,15 @@ export function parseBlueprint(canonicalText: string): ExecutionBlueprint {
     const rawMarkdown = tasksText.slice(start, end).trim();
     const id = match[1];
     const title = match[2].trim();
+    const sectionHeadings = new Set(
+      [...rawMarkdown.matchAll(/^####\s+(.+?)\s*$/gm)].map((headingMatch) => headingMatch[1].trim()),
+    );
+    const missingSections = REQUIRED_PLAN_SECTIONS.filter((heading) => !sectionHeadings.has(heading));
+    if (missingSections.length > 0) {
+      throw new Error(
+        `BLUEPRINT_INVALID: ${id} is missing canonical field heading(s): ${missingSections.map((heading) => `#### ${heading}`).join(', ')}. Plain "Label:" lines are not accepted.`,
+      );
+    }
     return {
       id,
       title,
@@ -231,6 +260,11 @@ export function parseBlueprint(canonicalText: string): ExecutionBlueprint {
     for (const dependency of plan.dependsOn) {
       if (!ids.includes(dependency)) throw new Error(`${plan.id} depends on unknown task ${dependency}.`);
       if (dependency === plan.id) throw new Error(`${plan.id} cannot depend on itself.`);
+    }
+    if (!extractValidationCommand(plan.canonicalValidation) && plan.canonicalValidation.trim() !== 'None') {
+      throw new Error(
+        `BLUEPRINT_INVALID: ${plan.id} Canonical validation must contain a fenced command, one "Command:" line, or exactly "None".`,
+      );
     }
   }
 
@@ -268,4 +302,9 @@ export function extractValidationCommand(section: string): string | undefined {
   const single = section.match(/^Command:\s*(.+)$/im)?.[1]?.trim();
   if (single) return stripTicks(single);
   return undefined;
+}
+
+export function blueprintErrorCode(error: unknown): string | undefined {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.match(/^(BLUEPRINT_(?:INVALID|STALE|FRESHNESS_UNAVAILABLE)):/)?.[1];
 }
