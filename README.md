@@ -76,6 +76,8 @@ The blueprint stays human-readable in chat. It contains bounded write scope, for
 
 On the next user turn, `agy_start_plan` receives Codex's MCP `threadId` metadata, reads the local Codex rollout under `$CODEX_HOME`, extracts the latest complete canonical blueprint, and persists it. Codex does **not** send the full blueprint through a tool argument again.
 
+In v0.5.5, a Plan Mode `<proposed_plan>` tag is only an outer rendering wrapper. The content between the AGY markers must retain the exact `### PLAN-XX: ...` title form and canonical `####` fields. `agy_start_plan` rejects malformed plans before creating a worker and reports `BLUEPRINT_INVALID` separately from transcript-capture failures.
+
 > [!NOTE]
 > Canonical transcript capture is intentionally a local Codex integration. It depends on Codex providing `threadId` MCP metadata and retaining the local rollout. If capture cannot be performed safely, execution fails clearly instead of asking Codex to regenerate the full blueprint into a tool call.
 

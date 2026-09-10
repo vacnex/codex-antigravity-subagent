@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.5 - 2026-09-10
+
+- Keep the canonical `AGY_BLUEPRINT:v1` schema intact when Codex Plan Mode requires an outer `<proposed_plan>` wrapper.
+- Reject em-dash/en-dash PLAN headings, missing canonical `####` fields, and ambiguous canonical-validation prose before any AGY worker can start.
+- Report malformed captured plans as `BLUEPRINT_INVALID` while preserving distinct stale/freshness errors instead of collapsing them into `BLUEPRINT_CAPTURE_UNAVAILABLE`.
+- Add regression coverage for the malformed blueprint shape observed in Codex session `01a08915-157b-7fa0-a5a6-bc0fc7b048c6`.
+
 ## 0.5.4 - 2026-09-09
 
 - Detect false `SUCCESS` results when AGY returns the `print-timeout` marker with partial output; the logical PLAN worker continues the same conversation within bounded recovery limits.
