@@ -1,4 +1,4 @@
-import assert from 'node:assert/strict';
+﻿import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -53,7 +53,7 @@ assert.match(reviewBlock, /includeDiff:\s*z\.boolean\(\)\.default\(false\)/);
 assert.match(reviewBlock, /hasOwnedDelta/);
 assert.doesNotMatch(reviewBlock, /plan\.rawMarkdown/, 'review output must not repeat the approved PLAN');
 
-assert.match(driverSource, /MAX_PLAN_AUTO_RESUMES\s*=\s*4/);
+assert.match(driverSource, /MAX_PLAN_AUTO_RESUMES\s*=\s*2/);
 assert.match(driverSource, /MAX_LOGICAL_PLAN_WALL_MS/);
 assert.match(driverSource, /MAX_STAGNANT_RESPONSE_TIMEOUTS/);
 assert.match(driverSource, /AGY INTERNAL PLAN CONTINUATION/);

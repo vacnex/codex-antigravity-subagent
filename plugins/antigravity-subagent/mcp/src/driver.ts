@@ -1,4 +1,4 @@
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+﻿import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { once } from 'node:events';
 import { createInterface } from 'node:readline';
 
@@ -45,8 +45,8 @@ type PendingTurn = {
   onAbort?: () => void;
 };
 
-const MAX_PLAN_AUTO_RESUMES = 4;
-const MAX_LOGICAL_PLAN_WALL_MS = 30 * 60_000;
+const MAX_PLAN_AUTO_RESUMES = 2;
+const MAX_LOGICAL_PLAN_WALL_MS = 15 * 60_000;
 const MAX_STAGNANT_RESPONSE_TIMEOUTS = 2;
 const DEFAULT_INACTIVITY_TIMEOUT_MS = 10 * 60_000;
 const DRIVER_RESTART_INIT_TIMEOUT_MS = 15_000;

@@ -1,4 +1,4 @@
-import {
+﻿import {
   acceptedContent,
   inputRequired,
   inputResponse,
@@ -125,11 +125,12 @@ export async function resolveLaunchSelection(
         // Continue with fallback slug
       }
       const preferredModel = input.requestedModel
-        ?? fallbackFamilies[0]?.directSlug
+        ?? fallbackFamilies[0]?.variants?.medium
         ?? fallbackFamilies[0]?.variants?.high
+        ?? fallbackFamilies[0]?.directSlug
         ?? fallbackFamilies[0]?.value
-        ?? 'gemini-3.8-flash-high';
-      const preferredEffort: Effort = input.requestedEffort ?? 'high';
+        ?? 'gemini-3.8-flash-medium';
+      const preferredEffort: Effort = input.requestedEffort ?? 'medium';
       if (input.projectResolution.kind === 'error') {
         return {
           kind: 'error',
@@ -263,7 +264,7 @@ export async function resolveLaunchSelection(
             projectLaunch = { kind: 'existing', projectId: project.id };
             projectResolution = input.projectResolution.kind;
           }
-          const selectedEffort = input.requestedEffort ?? pinnedEffort ?? effortValue(content.effort) ?? 'high';
+          const selectedEffort = input.requestedEffort ?? pinnedEffort ?? effortValue(content.effort) ?? 'medium';
           const selectedModel = typeof content.model === 'string' ? content.model : input.requestedModel;
           if (selectedModel) {
             const resolved = resolveFamilyModel(families, selectedModel, selectedEffort);

@@ -1,10 +1,10 @@
-import { readFile, stat } from 'node:fs/promises';
+﻿import { readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 
 import type { BlueprintPlan, ExecutionBlueprint } from './blueprint.js';
 
-const SOURCE_FILE_LIMIT = 160 * 1024;
-const SOURCE_TOTAL_LIMIT = 800 * 1024;
+const SOURCE_FILE_LIMIT = 8 * 1024;
+const SOURCE_TOTAL_LIMIT = 24 * 1024;
 
 export type ReviewFinding = {
   file?: string;
@@ -23,7 +23,7 @@ Rules:
 - Follow the approved PLAN exactly; do not redesign it.
 - Do not invent a new architecture, public API contract, DTO shape, database decision, cross-module abstraction, or naming convention.
 - Modify only WRITE SCOPE. FORBIDDEN SCOPE is never writable.
-- Start from the supplied SOURCE CONTEXT and paths named by the PLAN.
+- Start from the supplied SOURCE CONTEXT and paths named by the PLAN. For files listed as SOURCE REFERENCE, read only the necessary sections using view_file before editing.
 - Do not perform repository-wide discovery or search parent directories/other drives.
 - You may read one additional file only when it is a direct dependency required to implement an approved symbol or resolve a concrete compile/runtime uncertainty.
 - Additional reading never expands write permission or decision authority.

@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+﻿import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { access } from 'node:fs/promises';
 import { constants } from 'node:fs';
@@ -218,7 +218,7 @@ function annotateWaitExit(
   return {
     content: [{
       type: 'text',
-      text: `${prefix} Worker ${workerId} continues running; call agy_wait again when needed.`,
+      text: `${prefix} Worker ${workerId} continues running; call agy_wait again if needed (max 2 wait calls; if still running, check agy_status or stop to avoid burning tokens).`,
     }],
     structuredContent: {
       workerId,
