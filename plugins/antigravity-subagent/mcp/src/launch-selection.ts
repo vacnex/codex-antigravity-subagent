@@ -112,10 +112,57 @@ export async function resolveLaunchSelection(
     requestedModel?: string;
     requestedEffort?: Effort;
     projectResolution: AgyProjectResolution;
+    allowDefaultFallback?: boolean;
   },
 ): Promise<LaunchSelectionResult> {
   const declined = declinedLaunch(ctx);
-  if (declined) return declined;
+  if (declined) {
+    if (input.allowDefaultFallback) {
+      let fallbackFamilies: ModelFamily[] = [];
+      try {
+        fallbackFamilies = groupModelOptions(await listAgyModels(input.executable, input.cwd)) as ModelFamily[];
+      } catch {
+        // Continue with fallback slug
+      }
+      const preferredModel = input.requestedModel
+        ?? fallbackFamilies[0]?.directSlug
+        ?? fallbackFamilies[0]?.variants?.high
+        ?? fallbackFamilies[0]?.value
+        ?? 'gemini-3.8-flash-high';
+      const preferredEffort: Effort = input.requestedEffort ?? 'high';
+      if (input.projectResolution.kind === 'error') {
+        return {
+          kind: 'error',
+          code: 'invalid_project_selection',
+          error: input.projectResolution.error,
+        };
+      }
+      let fallbackProject: AgyProject | undefined;
+      let projectLaunch: AgyProjectLaunch;
+      let projectResolution: LaunchProjectResolution;
+      if (input.projectResolution.kind === 'create') {
+        projectLaunch = { kind: 'new' };
+        projectResolution = 'created';
+      } else if (input.projectResolution.kind === 'ambiguous') {
+        fallbackProject = input.projectResolution.candidates[0];
+        projectLaunch = fallbackProject ? { kind: 'existing', projectId: fallbackProject.id } : { kind: 'new' };
+        projectResolution = fallbackProject ? 'selected' : 'created';
+      } else {
+        fallbackProject = input.projectResolution.project;
+        projectLaunch = { kind: 'existing', projectId: fallbackProject.id };
+        projectResolution = input.projectResolution.kind;
+      }
+      return {
+        kind: 'ready',
+        model: preferredModel,
+        effort: preferredEffort,
+        projectLaunch,
+        project: fallbackProject,
+        projectResolution,
+      };
+    }
+    return declined;
+  }
 
   if (input.projectResolution.kind === 'error') {
     return {
@@ -187,6 +234,54 @@ export async function resolveLaunchSelection(
         default: 'medium',
       };
       required.push('effort');
+    }
+
+    const mcpReq = ctx.mcpReq as any;
+    if (typeof mcpReq?.elicitInput === 'function') {
+      try {
+        const elicitResult = await mcpReq.elicitInput({
+          mode: 'form',
+          message: 'Choose the unresolved Antigravity worker settings.',
+          requestedSchema: { type: 'object', properties, required },
+        });
+        if (elicitResult.action === 'accept' && elicitResult.content) {
+          const content = elicitResult.content as Record<string, unknown>;
+          const selectedId = typeof content.projectId === 'string' ? content.projectId : undefined;
+          let project: AgyProject | undefined;
+          let projectLaunch: AgyProjectLaunch;
+          let projectResolution: LaunchProjectResolution;
+          if (input.projectResolution.kind === 'create') {
+            projectLaunch = { kind: 'new' };
+            projectResolution = 'created';
+          } else if (input.projectResolution.kind === 'ambiguous') {
+            project = input.projectResolution.candidates.find((entry) => entry.id === selectedId)
+              ?? input.projectResolution.candidates[0];
+            projectLaunch = project ? { kind: 'existing', projectId: project.id } : { kind: 'new' };
+            projectResolution = project ? 'selected' : 'created';
+          } else {
+            project = input.projectResolution.project;
+            projectLaunch = { kind: 'existing', projectId: project.id };
+            projectResolution = input.projectResolution.kind;
+          }
+          const selectedEffort = input.requestedEffort ?? pinnedEffort ?? effortValue(content.effort) ?? 'high';
+          const selectedModel = typeof content.model === 'string' ? content.model : input.requestedModel;
+          if (selectedModel) {
+            const resolved = resolveFamilyModel(families, selectedModel, selectedEffort);
+            if (!('kind' in resolved)) {
+              return {
+                kind: 'ready',
+                model: resolved.model,
+                effort: resolved.effort,
+                projectLaunch,
+                project,
+                projectResolution,
+              };
+            }
+          }
+        }
+      } catch {
+        // Fall through to modern inputRequired or fallback
+      }
     }
 
     const requestedSchema = { type: 'object' as const, properties, required } as ElicitParams['requestedSchema'];

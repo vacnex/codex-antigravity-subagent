@@ -9,7 +9,7 @@ import { serveStdio } from '@modelcontextprotocol/server/stdio';
 import * as z from 'zod/v4';
 
 import { findAgy, probeAgyCapabilities, type Effort } from './cli.js';
-import { BlueprintStore } from './blueprint-store.js';
+import { BlueprintStore, type StoredBlueprint } from './blueprint-store.js';
 import { blueprintErrorCode, findPlan, workspaceMatches } from './blueprint.js';
 import { captureLatestBlueprintFromThread } from './codex-transcript.js';
 import { capturePlanBaseline } from './git-baseline.js';
@@ -27,6 +27,7 @@ import {
 import { normalizeManagedResult } from './result-semantics.js';
 import { RunStore, type ExecutionRunRecord } from './run-store.js';
 import { WorkerRuntime, type RuntimeToolResult } from './runtime.js';
+import { getWorkspacePreferences, saveWorkspacePreferences } from './preferences.js';
 
 const packagePath = path.resolve(path.dirname(process.argv[1] ?? '.'), '..', 'package.json');
 const VERSION = (JSON.parse(readFileSync(packagePath, 'utf8')) as { version: string }).version;
@@ -485,16 +486,27 @@ async function createServer(): Promise<McpServer> {
       const executable = await findAgy();
       if (!executable) return textError('Antigravity CLI was not found. Run agy_check first.', 'AGY_NOT_FOUND');
       const registryBefore = await discoverAgyProjects();
-      const resolution = resolveAgyProject(resolvedCwd, registryBefore.projects, projectId);
+      const preferred = await getWorkspacePreferences(resolvedCwd);
+      const effectiveModel = model ?? preferred?.model;
+      const effectiveEffort = (effort ?? preferred?.effort) as Effort | undefined;
+      const effectiveProjectId = projectId ?? preferred?.projectId;
+      const resolution = resolveAgyProject(resolvedCwd, registryBefore.projects, effectiveProjectId);
       const selection = await resolveLaunchSelection(ctx, {
         executable,
         cwd: resolvedCwd,
-        requestedModel: model,
-        requestedEffort: effort as Effort | undefined,
+        requestedModel: effectiveModel,
+        requestedEffort: effectiveEffort,
         projectResolution: resolution,
+        allowDefaultFallback: true,
       });
       if ('inputRequests' in selection) return selection;
       if (selection.kind === 'error') return textError(selection.error, selection.code);
+
+      void saveWorkspacePreferences(resolvedCwd, {
+        model: selection.model,
+        effort: selection.effort,
+        projectId: selection.project?.id,
+      });
 
       const beforeIds = new Set(registryBefore.projects.map((entry) => entry.id));
       let result = await withAgyProjectLaunch(selection.projectLaunch, () => runtime.start({
@@ -562,7 +574,7 @@ async function createServer(): Promise<McpServer> {
     async ({ planId, runId, cwd, projectId, timeoutSeconds, agent, model, effort }, ctx) => {
       if (timeoutSeconds < 900) return planTimeoutError(timeoutSeconds);
       let run: ExecutionRunRecord;
-      let stored;
+      let stored: StoredBlueprint;
       if (runId) {
         try {
           run = await runStore.read(runId);
@@ -587,7 +599,17 @@ async function createServer(): Promise<McpServer> {
           if (!workspaceMatches(stored.blueprint.workspace, resolvedCwd)) {
             return textError(`Blueprint workspace ${stored.blueprint.workspace} does not match requested cwd ${resolvedCwd}.`, 'BLUEPRINT_WORKSPACE_MISMATCH');
           }
-          run = await runStore.create({ blueprintId: stored.blueprintId, threadId, cwd: resolvedCwd });
+          const existingRuns = await runStore.list();
+          const activeRun = existingRuns.find(
+            (r) => r.threadId === threadId
+              && r.blueprintId === stored.blueprintId
+              && workspaceMatches(r.cwd, resolvedCwd),
+          );
+          if (activeRun) {
+            run = activeRun;
+          } else {
+            run = await runStore.create({ blueprintId: stored.blueprintId, threadId, cwd: resolvedCwd });
+          }
         } catch (error) {
           return textError(
             error instanceof Error ? error.message : String(error),
@@ -667,16 +689,27 @@ async function createServer(): Promise<McpServer> {
       const executable = await findAgy();
       if (!executable) return textError('Antigravity CLI was not found. Run agy_check first.', 'AGY_NOT_FOUND');
       const registryBefore = await discoverAgyProjects();
-      const resolution = resolveAgyProject(run.cwd, registryBefore.projects, run.agyProjectId ?? projectId);
+      const preferred = await getWorkspacePreferences(run.cwd);
+      const effectiveModel = run.model ?? model ?? preferred?.model;
+      const effectiveEffort = (run.effort ?? effort ?? preferred?.effort) as Effort | undefined;
+      const effectiveProjectId = run.agyProjectId ?? projectId ?? preferred?.projectId;
+      const resolution = resolveAgyProject(run.cwd, registryBefore.projects, effectiveProjectId);
       const selection = await resolveLaunchSelection(ctx, {
         executable,
         cwd: run.cwd,
-        requestedModel: run.model ?? model,
-        requestedEffort: (run.effort ?? effort) as Effort | undefined,
+        requestedModel: effectiveModel,
+        requestedEffort: effectiveEffort,
         projectResolution: resolution,
+        allowDefaultFallback: true,
       });
       if ('inputRequests' in selection) return selection;
       if (selection.kind === 'error') return textError(selection.error, selection.code);
+
+      void saveWorkspacePreferences(run.cwd, {
+        model: selection.model,
+        effort: selection.effort,
+        projectId: selection.project?.id,
+      });
 
       let prompt: string;
       try {

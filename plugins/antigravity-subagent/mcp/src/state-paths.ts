@@ -31,3 +31,10 @@ export function resolveRunStateDir(
 ): string {
   return path.join(resolvePluginStateRoot(env, homeDir), 'runs');
 }
+
+export function resolvePreferencesFilePath(
+  env: NodeJS.ProcessEnv = process.env,
+  homeDir: string = os.homedir(),
+): string {
+  return path.join(resolvePluginStateRoot(env, homeDir), 'preferences.json');
+}
