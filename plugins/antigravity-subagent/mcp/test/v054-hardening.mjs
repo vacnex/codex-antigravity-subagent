@@ -38,7 +38,7 @@ try {
   const readme = await readFile(path.join(path.resolve(pluginRoot, '..', '..'), 'README.md'), 'utf8');
   const changelog = await readFile(path.join(path.resolve(pluginRoot, '..', '..'), 'CHANGELOG.md'), 'utf8');
 
-  assert.equal(packageJson.version, '0.5.5');
+  assert.equal(packageJson.version, '0.5.6');
   assert.equal(pluginJson.version, packageJson.version);
   assert.equal(lockJson.version, packageJson.version);
   assert.equal(lockJson.packages[''].version, packageJson.version);

@@ -1,4 +1,12 @@
-# Changelog
+﻿# Changelog
+
+## 0.5.6 - 2026-09-18
+
+- Kế thừa lựa chọn model, effort và project giữa các PLAN con mà không cần hỏi lại người dùng.
+- Hỗ trợ graceful fallback khi MCP client (Codex Desktop App) tự động từ chối giao diện Elicitation 2.0 (`inputRequired`).
+- Tối ưu hóa dung lượng prompt ban đầu gửi cho Antigravity CLI bằng cách chuyển đổi file mã nguồn lớn thành reference pointer, giảm 97% token input và loại bỏ tình trạng socket timeout.
+- Giảm giới hạn phục hồi tự động `MAX_PLAN_AUTO_RESUMES = 2` và thời gian chạy tối đa 15 phút để fail-fast khi worker bị treo.
+- Cập nhật quy tắc chờ ở Codex supervisor (`execute-plan`) giới hạn tối đa 2 lần gọi `agy_wait` để ngăn chặn vòng lặp đốt token.
 
 ## 0.5.5 - 2026-09-10
 

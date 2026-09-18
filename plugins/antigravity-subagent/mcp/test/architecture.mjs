@@ -1,4 +1,4 @@
-﻿import assert from 'node:assert/strict';
+import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -21,7 +21,7 @@ const blueprintSkill = await readFile(path.join(pluginRoot, 'skills', 'execution
 const executeSkill = await readFile(path.join(pluginRoot, 'skills', 'execute-plan', 'SKILL.md'), 'utf8');
 const mcpConfig = await readFile(path.join(pluginRoot, '.mcp.json'), 'utf8');
 
-assert.equal(packageJson.version, '0.5.5');
+assert.equal(packageJson.version, '0.5.6');
 assert.equal(pluginJson.version, packageJson.version, 'plugin and MCP package versions must stay in sync');
 assert.equal(lockJson.version, packageJson.version, 'package-lock root version must stay in sync');
 assert.equal(lockJson.packages?.['']?.version, packageJson.version, 'package-lock root package version must stay in sync');

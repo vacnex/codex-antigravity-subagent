@@ -164,7 +164,7 @@ try {
     assertToolSucceeded('agy_check', check);
     assert.match(check.content[0].text, /Antigravity CLI is available at:/);
     assert.equal(check.structuredContent?.compatible, true);
-    assert.equal(check.structuredContent?.serverVersion, '0.5.5');
+    assert.equal(check.structuredContent?.serverVersion, '0.5.6');
     const streamingExpected = check.structuredContent?.streaming?.persistentDriver === true;
 
     const startArgs = {
