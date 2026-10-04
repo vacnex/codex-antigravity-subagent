@@ -15,8 +15,14 @@ Your Claude quota is the expensive resource. Spend it on decisions, not on prose
 
 ## Process
 
-1. **Understand the request.** If a decision is genuinely the user's (behavior, UX, data
-   rules), ask before planning. Do not ask about things the code can tell you.
+1. **Understand the request and size it.** If a decision is genuinely the user's
+   (behavior, UX, data rules), ask before planning. Do not ask about things the code can
+   tell you. Then judge the size:
+   - Tiny (a few lines, one file): do it yourself, no blueprint. Tell the user why.
+   - Medium: a blueprint with a single short PLAN.
+   - Large: several PLANs.
+   Uncommitted changes in the working tree are part of the codebase you plan against;
+   agy will work in place and see them too.
 
 2. **Map the working area, not the whole repo.**
    - Find the module/folders the task belongs to. Read only what you need there.
@@ -35,7 +41,7 @@ Your Claude quota is the expensive resource. Spend it on decisions, not on prose
 4. **Split into PLANs** (see blueprint-template.md):
    - Prefer few, larger PLANs. Each PLAN is a full delegate/review round trip.
    - A PLAN is independent unless it uses something another PLAN creates → `depends_on`.
-   - PLANs may run in parallel only if their `write` sets do not overlap.
+     PLANs run one after another; Claude reviews once per dependency layer.
    - Set `executor: claude` for parts that are tricky core logic where agy would likely
      fail and the rework would cost more than doing it yourself. Default is `agy`.
 

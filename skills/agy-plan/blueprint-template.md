@@ -129,7 +129,7 @@ public sealed class OrderReportRowDto
 ## Ghi chú cho người đọc template
 
 - Frontmatter (`write`, `wiring`, `read_only`, `depends_on`, `executor`) do script đọc để:
-  xếp thứ tự/song song, kiểm scope bằng `git diff`, quyết định ai thực hiện.
+  xếp thứ tự chạy, kiểm scope bằng `git diff`, quyết định ai thực hiện.
 - `write` có thể là file cụ thể hoặc thư mục (kết thúc bằng `/`).
 - Code block có `file=` trong `## Contracts` được script ghi ra đĩa trước khi agy chạy.
 - agy nhận PLAN file này + một "worker brief" cố định (luật chung + yêu cầu báo cáo trinh
