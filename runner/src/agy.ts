@@ -15,6 +15,7 @@ export type TurnResult = {
   usage?: AgyUsage;
   deniedActions: string[];
   autoResumes: number;
+  durationSeconds: number;
   stderrTail: string;
 };
 
@@ -93,7 +94,8 @@ function oneTurn(opts: TurnOptions, prompt: string, conversationId: string | und
   return new Promise((resolve) => {
     const [file, argv] = command(opts.agy, args);
     const child = spawn(file, argv, { cwd: opts.cwd, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'], env: process.env });
-    const result: TurnResult = { conversationId, status: 'CRASH', response: '', deniedActions: [], autoResumes: 0, stderrTail: '' };
+    const result: TurnResult = { conversationId, status: 'CRASH', response: '', deniedActions: [], autoResumes: 0, durationSeconds: 0, stderrTail: '' };
+    const started = Date.now();
     let settled = false;
     let gotResult = false;
     let idleTimer: NodeJS.Timeout;
@@ -103,6 +105,7 @@ function oneTurn(opts: TurnOptions, prompt: string, conversationId: string | und
       clearTimeout(idleTimer);
       clearTimeout(deadline);
       if (status) result.status = status;
+      result.durationSeconds = Math.round((Date.now() - started) / 1000);
       killTree(child.pid);
       resolve(result);
     };
@@ -151,6 +154,7 @@ export async function runTurn(opts: TurnOptions): Promise<TurnResult> {
   const max = opts.maxAutoResumes ?? 2;
   let res = await oneTurn(opts, opts.prompt, opts.conversationId);
   let resumes = 0;
+  let total = res.durationSeconds;
   while (
     resumes < max &&
     res.conversationId &&
@@ -159,7 +163,9 @@ export async function runTurn(opts: TurnOptions): Promise<TurnResult> {
     resumes += 1;
     appendFileSync(opts.logFile, `{"event":"agy-run","note":"auto-resume ${resumes} after ${res.status}"}\n`);
     res = await oneTurn(opts, CONTINUE_PROMPT, res.conversationId);
+    total += res.durationSeconds;
   }
   res.autoResumes = resumes;
+  res.durationSeconds = total;
   return res;
 }

@@ -7506,7 +7506,8 @@ function oneTurn(opts, prompt, conversationId) {
   return new Promise((resolve) => {
     const [file, argv] = command(opts.agy, args);
     const child = spawn2(file, argv, { cwd: opts.cwd, windowsHide: true, stdio: ["pipe", "pipe", "pipe"], env: process.env });
-    const result = { conversationId, status: "CRASH", response: "", deniedActions: [], autoResumes: 0, stderrTail: "" };
+    const result = { conversationId, status: "CRASH", response: "", deniedActions: [], autoResumes: 0, durationSeconds: 0, stderrTail: "" };
+    const started = Date.now();
     let settled = false;
     let gotResult = false;
     let idleTimer;
@@ -7516,6 +7517,7 @@ function oneTurn(opts, prompt, conversationId) {
       clearTimeout(idleTimer);
       clearTimeout(deadline);
       if (status) result.status = status;
+      result.durationSeconds = Math.round((Date.now() - started) / 1e3);
       killTree(child.pid);
       resolve(result);
     };
@@ -7563,14 +7565,17 @@ async function runTurn(opts) {
   const max = opts.maxAutoResumes ?? 2;
   let res = await oneTurn(opts, opts.prompt, opts.conversationId);
   let resumes = 0;
+  let total = res.durationSeconds;
   while (resumes < max && res.conversationId && (isResponseTimeout(`${res.response}
 ${res.error ?? ""}`) || res.status === "IDLE_TIMEOUT")) {
     resumes += 1;
     appendFileSync(opts.logFile, `{"event":"agy-run","note":"auto-resume ${resumes} after ${res.status}"}
 `);
     res = await oneTurn(opts, CONTINUE_PROMPT, res.conversationId);
+    total += res.durationSeconds;
   }
   res.autoResumes = resumes;
+  res.durationSeconds = total;
   return res;
 }
 
@@ -8006,7 +8011,7 @@ function formatPlan(state, r) {
   const scope = c ? c.outOfScope.length ? `scope:VIOLATION(${c.outOfScope.length})` : "scope:OK" : "";
   const val = c ? c.validate.skipped ? "validate:SKIP" : c.validate.ok ? "validate:PASS" : "validate:FAIL" : "";
   lines.push(
-    [`${r.plan.id} ${ps.status.toUpperCase()}`, r.agyResult ? `agy:${r.agyResult}` : "", counts, scope, val, `autofix:${ps.autoFixes}`, r.turn ? `resumes:${r.turn.autoResumes}` : ""].filter(Boolean).join("  ") + tokens(r.turn)
+    [`${r.plan.id} ${ps.status.toUpperCase()}`, r.agyResult ? `agy:${r.agyResult}` : "", counts, scope, val, `autofix:${ps.autoFixes}`, r.turn ? `resumes:${r.turn.autoResumes}` : "", r.turn ? `${r.turn.durationSeconds}s` : ""].filter(Boolean).join("  ") + tokens(r.turn)
   );
   if (r.note) lines.push(`  note: ${r.note}`);
   if (c?.changed.length) lines.push(`  changed: ${c.changed.map((x) => `${x.status} ${x.file}`).join(", ")}`);
@@ -8129,7 +8134,7 @@ title: ${bp.title}
 model: ${flash.model}
 validate: ${bp.validate.join(" ; ") || "(none)"}
 ${lay}
-NEXT: agy-run next ${run}`
+NEXT: agy-run next   (latest run; or --run ${run})`
   };
 }
 async function cmdNext(cwd, runArg) {

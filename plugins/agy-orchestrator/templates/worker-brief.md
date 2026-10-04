@@ -38,7 +38,8 @@ If "Conflicts with the PLAN" is not none, stop and report BLOCKED. Do not improv
 ## Step 3 — Self-check, then final report
 
 Re-read the files you changed against the PLAN's Placement map, Reuse, Edge cases and
-Gotchas. Fix what does not match. Then output:
+Gotchas. Fix what does not match. Then output the report below, using plain
+repo-relative paths (no links, no absolute paths):
 
 ```
 ## Result: DONE | BLOCKED

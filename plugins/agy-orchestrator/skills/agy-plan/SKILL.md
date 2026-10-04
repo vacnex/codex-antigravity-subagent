@@ -1,15 +1,15 @@
 ---
 name: agy-plan
-description: Plan a coding task as a blueprint of PLAN files that the Antigravity CLI (agy) will implement. Use when the user asks to plan work for agy, or runs /agy-plan. Produces files under .agy/runs/<run-id>/ for the user to review; does not modify source code.
+description: Plan a coding task as a blueprint that the Antigravity CLI (agy) will implement, with Claude reviewing. Use when the user asks to plan a feature or change ("lên kế hoạch", "plan this", "/plan"), in plan mode, or asks to delegate work to agy. Produces one blueprint file for the user to approve; does not modify source code.
 argument-hint: <task description>
 ---
 
 # agy-plan
 
-You are the planner. agy is a fast but careless implementer: its code compiles, but it
-puts code in the wrong place, re-invents helpers that already exist, piles logic into one
-"god" class, and misses framework gotchas. Your plan exists to remove those choices from
-agy. You do NOT write the implementation here.
+You are the planner. agy (newest Gemini Flash) is a fast but careless implementer: its
+code compiles, but it puts code in the wrong place, re-invents helpers that already
+exist, piles logic into one "god" class, and misses framework gotchas. Your plan removes
+those choices from agy. You do NOT write the implementation here.
 
 Your Claude quota is the expensive resource. Spend it on decisions, not on prose.
 
@@ -22,7 +22,7 @@ Your Claude quota is the expensive resource. Spend it on decisions, not on prose
    - Medium: a blueprint with a single short PLAN.
    - Large: several PLANs.
    Uncommitted changes in the working tree are part of the codebase you plan against;
-   agy will work in place and see them too.
+   agy works in place and sees them too.
 
 2. **Map the working area, not the whole repo.**
    - Find the module/folders the task belongs to. Read only what you need there.
@@ -33,59 +33,66 @@ Your Claude quota is the expensive resource. Spend it on decisions, not on prose
      folders like Shared/Common/Utils/Infrastructure/lib). Do not read them fully unless
      a signature matters.
    - If the repo has CLAUDE.md / AGENTS.md / GEMINI.md, skim it. Do not require one.
+   - Find the build/typecheck command the project already uses (solution/csproj, package
+     scripts, Makefile...). It becomes `validate`.
 
 3. **Decide the structure yourself.** Every new public symbol gets a fixed location.
    Every reusable helper is named explicitly. New shared helpers are created only if you
    decide so, and in the place you decide.
 
-4. **Split into PLANs** (see blueprint-template.md):
+4. **Split into PLANs.**
    - Prefer few, larger PLANs. Each PLAN is a full delegate/review round trip.
    - A PLAN is independent unless it uses something another PLAN creates → `depends_on`.
-     PLANs run one after another; Claude reviews once per dependency layer.
-   - Set `executor: claude` for parts that are tricky core logic where agy would likely
-     fail and the rework would cost more than doing it yourself. Default is `agy`.
+     PLANs run one after another; you review once per dependency layer.
+   - Set `executor: claude` for tricky core logic where agy would likely fail and the
+     rework would cost more than doing it yourself. Default is `agy`.
 
 5. **Write contracts as code when they are public or shared.** New interfaces, DTOs,
    API/request/response shapes, or types used by more than one PLAN go in the PLAN's
-   `## Contracts` section as code blocks with a `file=` path. They are written to disk
-   verbatim before agy starts, so agy cannot invent them. Signatures only, no bodies.
-   Skip this for purely internal code.
+   `### Contracts` as code blocks with `file=<path>`. The runner writes them to disk
+   verbatim before agy starts. Signatures only, no bodies. Skip for internal code.
 
-6. **Write the files** to `.agy/runs/<YYYYMMDD-HHmm>-<slug>/`:
-   - `blueprint.md` — overview, PLAN table, validation, manual test checklist
-   - `PLAN-01.md`, `PLAN-02.md`, ... — one per PLAN
-   Ensure `.agy/` is listed in `.git/info/exclude` (never edit the user's .gitignore).
+6. **Write the blueprint** — one markdown file in the exact format of
+   `${CLAUDE_PLUGIN_ROOT}/skills/agy-plan/blueprint-template.md` (read it the first time
+   in a session). Where it goes:
+   - **In plan mode:** the blueprint IS the plan file named in the plan mode
+     instructions. Write it there, then call ExitPlanMode. The user's approval starts
+     execution (the agy-execute skill takes over).
+   - **Otherwise:** write it to `.agy/drafts/<short-slug>.md` in the repository root.
+     The runner keeps `.agy/` out of git automatically on import.
 
 7. **Report to the user** in a short message: the PLAN table, decisions worth checking,
-   and the run path. Do not paste the plan files into chat; the user reads them.
-   Tell the user to edit the files directly if needed, then run `/agy-go`.
+   and where the file is. Do not paste the blueprint into chat. Outside plan mode, tell
+   the user to edit the file if needed and say "ok" (or similar) to start execution.
 
 ## Quality bar for each PLAN
 
 A PLAN is ready when agy has nothing structural left to decide:
 
-- **Precedents** — at least one concrete file to imitate for each kind of thing created.
+- **Precedents** (`### Làm theo mẫu`) — a concrete file to imitate for each kind of thing.
 - **Placement map** — every new public class/function/component → exact file.
 - **Reuse** — existing helpers that must be used, by exact name and path.
-- **Boundary** — `write` paths (module scope), `wiring` points (exact files and what to
-  add, e.g. DI registration line), and what is read-only (shared folders, other modules).
-- **Edge cases** — the specific ones that matter (null/empty, not found, permission,
-  paging, concurrency...), each with the expected behavior.
+- **Boundary** — `write` (prefer exact files; a folder only for genuinely open sets like
+  a views folder), `wiring` files with the exact edit in `### Wiring`, `read_only` shared
+  folders.
+- **Edge cases** — the ones that matter, each with the expected behavior.
 - **Gotchas** — framework traps visible in this code, e.g. Vue `@click` inside Razor
   `.cshtml` must be written `@@click`. Point to the precedent that shows it.
-- **Done when** — observable results, plus the build command passing.
+- **Done when** — observable results.
 
-Do not include: architecture essays, restating the user request, generic coding advice
-("write clean code"), or instructions agy already gets from the worker brief.
+Do not include: architecture essays, restating the user request, generic coding advice,
+or rules agy already gets from its fixed worker brief (recon report, scope rules, no
+shell commands, final report format).
 
 ## Validation and testing
 
-- Use the project's existing build/typecheck/lint command and existing test suite (if
-  any) as regression checks. One command per line, runnable as-is from the repo root.
+- `validate` = the project's existing build/typecheck/lint/test commands, one executable
+  per line, runnable from the repo root, no `&&`, pipes or redirects. The runner runs
+  them after each PLAN; agy cannot run commands.
 - Do NOT plan new test files unless the user asks. The user tests features manually:
-  write a short **manual test checklist** in blueprint.md (steps → expected result).
+  write a short `## Checklist test tay` (steps → expected result) after the last PLAN.
 
 ## Language
 
-Write plan content in the user's language. Keep section headings and frontmatter keys
-exactly as in the template so scripts can parse them.
+Write plan content in the user's language. Keep the fenced block names, field names and
+`## PLAN-XX: title` headings exactly as in the template so the runner can parse them.

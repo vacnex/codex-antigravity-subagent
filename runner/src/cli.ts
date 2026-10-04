@@ -118,7 +118,7 @@ function formatPlan(state: RunState, r: PlanRun): string {
   const scope = c ? (c.outOfScope.length ? `scope:VIOLATION(${c.outOfScope.length})` : 'scope:OK') : '';
   const val = c ? (c.validate.skipped ? 'validate:SKIP' : c.validate.ok ? 'validate:PASS' : 'validate:FAIL') : '';
   lines.push(
-    [`${r.plan.id} ${ps.status.toUpperCase()}`, r.agyResult ? `agy:${r.agyResult}` : '', counts, scope, val, `autofix:${ps.autoFixes}`, r.turn ? `resumes:${r.turn.autoResumes}` : '']
+    [`${r.plan.id} ${ps.status.toUpperCase()}`, r.agyResult ? `agy:${r.agyResult}` : '', counts, scope, val, `autofix:${ps.autoFixes}`, r.turn ? `resumes:${r.turn.autoResumes}` : '', r.turn ? `${r.turn.durationSeconds}s` : '']
       .filter(Boolean)
       .join('  ') + tokens(r.turn),
   );
@@ -260,7 +260,7 @@ function cmdImport(cwd: string, file: string): Outcome {
     .join('\n');
   return {
     code: 0,
-    text: `RUN ${run}\ntitle: ${bp.title}\nmodel: ${flash.model}\nvalidate: ${bp.validate.join(' ; ') || '(none)'}\n${lay}\nNEXT: agy-run next ${run}`,
+    text: `RUN ${run}\ntitle: ${bp.title}\nmodel: ${flash.model}\nvalidate: ${bp.validate.join(' ; ') || '(none)'}\n${lay}\nNEXT: agy-run next   (latest run; or --run ${run})`,
   };
 }
 
