@@ -29,7 +29,23 @@ Notes:
 - `write_stdin` empty polls wait 5–300 s; `exec_command` yields after at most 30 s on
   Windows.
 
-## Resulting design
+## Decisions (2026-10-04)
+
+1. **No Codex plan mode dependency**: `$agy-plan` always writes the blueprint to
+   `.agy/drafts/<slug>.md`; the user says "ok" to run `$agy-execute`. In Plan mode the
+   skill gives only an outline and asks the user to switch to Default mode, so the
+   blueprint is never written twice.
+2. **Full access required** (option D): the plugin requires Codex with
+   `sandbox_mode = "danger-full-access"`. No rules file and no launcher. `agy-run check`
+   detects a sandboxed agy and says so.
+3. **Runner path**: the skill calls `node <plugin-root>/dist/agy-run.mjs`, with the
+   plugin root derived from the SKILL.md location; nothing needs to be on PATH.
+
+Rejected for now: a stable launcher plus a `prefix_rule` allow rule (works, see
+experiments 4–5, and keeps the sandbox for everything else); reading the plan from the
+Codex transcript (fragile across Codex versions).
+
+## Original design notes
 
 - **Shared core**: `runner/` builds `agy-run.mjs`, used by both plugins.
 - **Codex plugin** `plugins/agy-orchestrator-codex/`: `.codex-plugin/plugin.json`,

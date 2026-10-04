@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "build": "esbuild src/cli.ts --bundle --platform=node --target=node20 --format=esm --outfile=../plugins/agy-orchestrator/dist/agy-run.mjs --banner:js=\"import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);\"",
+    "build": "esbuild src/cli.ts --bundle --platform=node --target=node20 --format=esm --outfile=../plugins/agy-orchestrator/dist/agy-run.mjs --banner:js=\"import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);\" && node scripts/sync-codex.mjs",
     "test": "npm run build && node --test test/*.test.mjs"
   },
   "devDependencies": {

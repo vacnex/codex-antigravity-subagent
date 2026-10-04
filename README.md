@@ -105,6 +105,22 @@ claude plugin marketplace remove agy-orchestrator
 This also uninstalls the plugin. If you used way B, remove the two entries from
 `~/.claude/settings.json` as well.
 
+## Codex version (branch `codex-revisited`, experimental)
+
+The same workflow for the Codex CLI / Codex app: plugin `agy-orchestrator-codex`, skills
+`$agy-plan` and `$agy-execute`, the same runner. No MCP server. Codex must run with
+**full access** (`sandbox_mode = "danger-full-access"`), because agy needs the network,
+`~/.gemini` and its login, which Codex's sandbox blocks. Background:
+[docs/codex-port.md](docs/codex-port.md).
+
+```bash
+codex plugin marketplace add vacnex/codex-antigravity-subagent --ref codex-revisited
+```
+
+```bash
+codex plugin add agy-orchestrator-codex@agy-orchestrator
+```
+
 ## For AI agents installing this plugin
 
 If a user asks you to install this plugin from this repository:

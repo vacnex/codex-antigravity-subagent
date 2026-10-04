@@ -1,0 +1,27 @@
+{
+  "name": "agy-orchestrator-codex",
+  "version": "0.1.5",
+  "description": "Codex plans and reviews; the Antigravity CLI (agy) implements with the newest Gemini Flash model.",
+  "author": {
+    "name": "tghuy"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/vacnex/codex-antigravity-subagent/tree/codex-revisited",
+  "repository": "https://github.com/vacnex/codex-antigravity-subagent",
+  "keywords": ["antigravity", "agy", "delegation", "orchestration"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "agy orchestrator",
+    "shortDescription": "Codex plans and reviews, agy writes the code.",
+    "longDescription": "Plan a feature as a short blueprint with precedents and a placement map, let the Antigravity CLI implement each PLAN in place with checkpoints, scope checks and its own validate runs, then review layer by layer. Saves Codex usage on large tasks. Requires Codex with full access, Node.js 20+, git and a logged-in agy.",
+    "developerName": "tghuy",
+    "category": "Developer Tools",
+    "capabilities": ["Local CLI", "Planning", "Delegation", "Code Review"],
+    "websiteURL": "https://github.com/vacnex/codex-antigravity-subagent/tree/codex-revisited",
+    "defaultPrompt": [
+      "Lên kế hoạch cho tính năng này để agy làm",
+      "Run the approved blueprint with agy",
+      "Check the status of the agy run"
+    ]
+  }
+}

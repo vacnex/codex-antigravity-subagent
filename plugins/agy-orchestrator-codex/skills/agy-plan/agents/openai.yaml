@@ -1,0 +1,4 @@
+interface:
+  display_name: "Plan for agy"
+  short_description: "Write a blueprint that the Antigravity CLI implements"
+  default_prompt: "Use $agy-plan to plan this feature as a blueprint for agy."

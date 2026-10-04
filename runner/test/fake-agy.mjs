@@ -14,6 +14,11 @@ if (args[0] === '--version') {
 }
 if (args[0] === 'models') {
   console.error('Fetching available models...');
+  if (process.env.FAKE_AGY_MODELS_FAIL === 'sandbox') {
+    console.error('E1004 server.go:3093] Post "https://play.googleapis.com/log": dial tcp: connectex: An attempt was made to access a socket in a way forbidden by its access permissions.');
+    console.error('I1004 server.go:3003] Waiting for migrations to complete...');
+    process.exit(1);
+  }
   if (process.env.FAKE_AGY_MODELS_FAIL) process.exit(1);
   console.log('gemini-3.7-flash-high\tGemini 3.7 Flash (High)');
   console.log('gemini-3.8-flash-high\tGemini 3.8 Flash (High)');

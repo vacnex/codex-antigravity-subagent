@@ -104,7 +104,15 @@ export function agyVersion(agy: string): string | undefined {
 /** Newest Gemini Flash slug for the requested effort, from `agy models`. */
 export function newestFlash(agy: string, effort: string): { model?: string; error?: string } {
   const r = spawnSync(...command(agy, ['models']), { encoding: 'utf8', windowsHide: true, timeout: 60_000 });
-  if (r.status !== 0) return { error: (r.stderr || r.stdout || 'agy models failed').trim().split('\n').pop() };
+  if (r.status !== 0) {
+    const out = `${r.stdout ?? ''}\n${r.stderr ?? ''}`;
+    // Inside a sandbox (e.g. Codex workspace-write) agy cannot reach the network, its
+    // ~/.gemini state or its login; the last log line rarely says so.
+    if (/forbidden by its access permissions|\.gemini[^\n]*Access is denied/i.test(out)) {
+      return { error: 'agy is sandboxed: it cannot reach the network or ~/.gemini. In Codex, run with sandbox_mode = "danger-full-access".' };
+    }
+    return { error: (r.stderr || r.stdout || 'agy models failed').trim().split('\n').pop() };
+  }
   const flash = r.stdout
     .split(/\r?\n/)
     .map((l) => l.split('\t')[0].trim())

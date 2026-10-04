@@ -1,0 +1,4 @@
+interface:
+  display_name: "Execute with agy"
+  short_description: "Run an approved blueprint with agy and review each layer"
+  default_prompt: "Use $agy-execute to run the approved blueprint in .agy/drafts/ with agy."

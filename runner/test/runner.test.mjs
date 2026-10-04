@@ -370,6 +370,27 @@ test('ALL DONE lists the files agy changed; the last layer is announced', () => 
   assert.match(r.out, /files changed by agy \(uncommitted\): src\/contracts\/greeter\.d\.ts, src\/greeter\.js, src\/use\.js/);
 });
 
+test('check explains a sandboxed agy instead of printing its last log line', () => {
+  const dir = makeRepo();
+  const r = spawnSync(process.execPath, [RUNNER, 'check'], {
+    cwd: dir,
+    encoding: 'utf8',
+    env: { ...process.env, AGY_PATH: FAKE_AGY, FAKE_AGY_MODELS_FAIL: 'sandbox' },
+  });
+  assert.equal(r.status, 1, r.stdout);
+  assert.match(r.stdout, /agy is sandboxed[\s\S]*danger-full-access/);
+});
+
+test('the Codex plugin carries the same runner build and templates as the Claude plugin', () => {
+  const plugins = path.resolve(here, '../../plugins');
+  for (const rel of ['dist/agy-run.mjs', 'templates/worker-brief.md', 'skills/agy-plan/blueprint-template.md']) {
+    assert.ok(
+      readFileSync(path.join(plugins, 'agy-orchestrator', rel)).equals(readFileSync(path.join(plugins, 'agy-orchestrator-codex', rel))),
+      `${rel} differs between the two plugins; run npm run build`,
+    );
+  }
+});
+
 test('invalid blueprint is rejected with a clear message', () => {
   const dir = makeRepo();
   const scen = scenario(dir, []);

@@ -7545,7 +7545,14 @@ function agyVersion(agy) {
 }
 function newestFlash(agy, effort) {
   const r = spawnSync2(...command(agy, ["models"]), { encoding: "utf8", windowsHide: true, timeout: 6e4 });
-  if (r.status !== 0) return { error: (r.stderr || r.stdout || "agy models failed").trim().split("\n").pop() };
+  if (r.status !== 0) {
+    const out = `${r.stdout ?? ""}
+${r.stderr ?? ""}`;
+    if (/forbidden by its access permissions|\.gemini[^\n]*Access is denied/i.test(out)) {
+      return { error: 'agy is sandboxed: it cannot reach the network or ~/.gemini. In Codex, run with sandbox_mode = "danger-full-access".' };
+    }
+    return { error: (r.stderr || r.stdout || "agy models failed").trim().split("\n").pop() };
+  }
   const flash = r.stdout.split(/\r?\n/).map((l) => l.split("	")[0].trim()).map((slug) => ({ slug, m: /^gemini-(\d+)\.(\d+)-flash-([a-z]+)$/.exec(slug) })).filter((x) => x.m && x.m[3] === effort).sort((a, b) => Number(b.m[1]) - Number(a.m[1]) || Number(b.m[2]) - Number(a.m[2]));
   return flash[0] ? { model: flash[0].slug } : { error: `no gemini-*-flash-${effort} model in \`agy models\`` };
 }
