@@ -7,7 +7,9 @@ surrounding code.
 ## Step 1 — Recon (before writing any code)
 
 Read the files listed under "Làm theo mẫu" and "Dùng lại", plus neighbors in the same
-folders as your `write` paths. Then output this report and nothing else in this step:
+folders as your `write` paths. Then output this report as text and go straight on to
+Step 2 in the same turn. The Recon report is not a stopping point: your turn ends only
+with the final report of Step 3 (or BLOCKED).
 
 ```
 ## Recon
@@ -31,7 +33,8 @@ If "Conflicts with the PLAN" is not none, stop and report BLOCKED. Do not improv
 - Files from the Contracts section already exist. Do not change their signatures.
 - Modify only `write` paths and the exact `wiring` edits. `read_only` paths and other
   modules: read only.
-- Do not add packages, do not refactor unrelated code, do not create test files.
+- Do not add packages, do not refactor unrelated code. Create or change test files only
+  when they are in your `write` paths.
 - Do not run shell commands (they are denied). The runner builds after you finish and
   sends you the errors if any.
 

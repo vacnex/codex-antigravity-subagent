@@ -17,6 +17,7 @@ export type PlanState = {
   fixes: number;
   turns: number;
   note?: string;
+  files?: string[]; // files changed since the checkpoint, as of the last check
   updatedAt?: string;
 };
 

@@ -47,6 +47,15 @@ export function fixPrompt(plan: Plan, findings: string, source: 'runner' | 'revi
   ].join('\n\n');
 }
 
+/** Sent once in the same conversation when agy ends its turn without a final report. */
+export function continuePrompt(plan: Plan): string {
+  return [
+    `# Continue ${plan.id}`,
+    'You ended your turn without the final "## Result:" report. The Recon report is not a stopping point.',
+    'Continue now in this conversation: implement everything the PLAN asks that is not done yet (Step 2), self-check (Step 3), and end with the final report.',
+  ].join('\n\n');
+}
+
 export type AgyReport = { result: 'DONE' | 'BLOCKED' | 'UNKNOWN'; text: string };
 
 /** Extract the final "## Result:" report from agy's response. */

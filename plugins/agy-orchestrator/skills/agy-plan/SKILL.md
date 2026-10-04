@@ -17,9 +17,12 @@ Your Claude quota is the expensive resource. Spend it on decisions, not on prose
 
 1. **Understand the request and size it.** If a decision is genuinely the user's
    (behavior, UX, data rules), ask before planning. Do not ask about things the code can
-   tell you. Then judge the size:
-   - Tiny (a few lines, one file): do it yourself, no blueprint. Tell the user why.
-   - Medium: a blueprint with a single short PLAN.
+   tell you. Then judge the size by the code that will be written:
+   - Small (under ~150 changed lines, or one or two files): do it yourself, no
+     blueprint, unless the user explicitly asks for agy. Tell the user why in one line.
+     Measured: below this size the plan + review round trips cost more Claude quota
+     than writing the code.
+   - Medium (~150–400 lines): a blueprint with a single PLAN.
    - Large: several PLANs.
    Uncommitted changes in the working tree are part of the codebase you plan against;
    agy works in place and sees them too.
@@ -51,6 +54,9 @@ Your Claude quota is the expensive resource. Spend it on decisions, not on prose
    API/request/response shapes, or types used by more than one PLAN go in the PLAN's
    `### Contracts` as code blocks with `file=<path>`. The runner writes them to disk
    verbatim before agy starts. Signatures only, no bodies. Skip for internal code.
+   Contracts are **only for files that do not exist yet** — check `git status` too,
+   since untracked files from earlier work count. New functions in an existing file go
+   in the Placement map as one-line signatures instead.
 
 6. **Write the blueprint** — one markdown file in the exact format of
    `${CLAUDE_PLUGIN_ROOT}/skills/agy-plan/blueprint-template.md` (read it the first time
@@ -84,12 +90,20 @@ Do not include: architecture essays, restating the user request, generic coding 
 or rules agy already gets from its fixed worker brief (recon report, scope rules, no
 shell commands, final report format).
 
+**Keep it short — the blueprint is Claude output, the most expensive tokens.** Point,
+do not write: name the precedent and the helper instead of describing them, one line
+per edge case, one line per test case. No function bodies, no pseudo-code, no
+copy of code that agy can read in the precedent. Target: the blueprint is at most about
+a third of the expected diff. If it is growing to the size of the code, the task is
+better done yourself.
+
 ## Validation and testing
 
 - `validate` = the project's existing build/typecheck/lint/test commands, one executable
   per line, runnable from the repo root, no `&&`, pipes or redirects. The runner runs
   them after each PLAN; agy cannot run commands.
-- Do NOT plan new test files unless the user asks. The user tests features manually:
+- Do NOT plan new test files unless the user asks. When they do, put the test files in
+  `write` (agy only touches tests listed there). The user tests features manually:
   write a short `## Checklist test tay` (steps → expected result) after the last PLAN.
 
 ## Language

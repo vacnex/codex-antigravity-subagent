@@ -5,7 +5,8 @@ One markdown file holds the whole blueprint. The runner reads three things from 
 - the ```` ```yaml agy-blueprint ```` block (once, near the top),
 - each `## PLAN-XX: title` section, which ends at the next `## ` heading,
 - inside each PLAN: the ```` ```yaml agy-plan ```` block, and code blocks whose info
-  string has `file=<path>` (contracts, written to disk before agy starts).
+  string has `file=<path>` (contracts, written to disk before agy starts; only for
+  files that do not exist yet, or the runner blocks the PLAN).
 
 Everything else is free markdown for humans. Inside a PLAN use `###` headings only, so
 the section does not end early. Put non-PLAN sections (summary, decisions, manual test

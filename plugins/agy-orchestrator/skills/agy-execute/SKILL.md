@@ -10,21 +10,27 @@ agy implements; you supervise and review. Do not implement agy PLANs yourself �
 burns the Claude quota this workflow exists to save. The runner `agy-run` (on the Bash
 PATH while this plugin is enabled) does every mechanical step.
 
+Every tool call re-sends the whole context, so the number of calls is what costs quota.
+Chain runner commands in one Bash call where this skill says so, and never read a
+background output file before its completion notification arrives.
+
 ## Start
 
-1. `agy-run check` once per session if you have not yet. Stop and tell the user if agy is
-   missing, not logged in, or a shadow copy warning appears.
-2. `agy-run import <blueprint file>` — the plan mode plan file, or `.agy/drafts/<x>.md`.
-   On `BLUEPRINT INVALID`, fix the file (it is yours) and import again.
-3. Run `agy-run next` with the Bash tool using `run_in_background: true` and
-   `timeout: 7200000`. Do not poll, sleep or call `status` while it runs: you are
-   notified when it exits. Tell the user in one line that agy is working.
+1. One Bash call: `agy-run check && agy-run import <blueprint file>` (skip `check` if it
+   already passed in this session). The blueprint is the plan mode plan file or
+   `.agy/drafts/<x>.md`. Stop and tell the user if agy is missing, not logged in, or a
+   shadow copy warning appears. On `BLUEPRINT INVALID`, fix the file (it is yours) and
+   import again.
+2. Run `agy-run next` with the Bash tool using `run_in_background: true` and
+   `timeout: 7200000`. Do not poll, sleep, `cat` its output or call `status` while it
+   runs: you are notified when it exits. Tell the user in one line that agy is working.
 
 ## Read the result
 
 `next` / `fix` print a compact report and exit with:
 - `0` — `READY FOR REVIEW` (or `ALL DONE`)
-- `2` — `NEEDS ATTENTION`: a PLAN is `BLOCKED`, `FAILED`, or `NEEDS-CLAUDE`
+- `2` — `NEEDS ATTENTION`: a PLAN is `BLOCKED`, `FAILED`, `NEEDS-CLAUDE`, or agy ended
+  without a final report (`agy:UNKNOWN`) even after the runner told it to continue
 - `1` — runner error (agy crash, login lost, git problem): report it to the user
 
 Per PLAN you get: agy's status, changed files, scope and validate results, auto-fixes
@@ -55,10 +61,12 @@ For each PLAN in `REVIEW`:
      yourself or ask the user.
    - **Wrong direction** → `agy-run undo PLAN-XX`, improve that PLAN's section in
      `.agy/runs/<run>/blueprint.md`, then `next` reruns it fresh.
-4. If the session can show the user a diff pane, open it on the changed files so the
-   user can look along.
-5. When every PLAN of the layer is good, run `agy-run next` again (background). That
-   accepts the layer and starts the next one.
+   Write findings and run-blueprint edits with a Bash heredoc, not Write/Edit: the app's
+   "Edited files" card lists only files Claude edits with those tools, so `.agy/` files
+   there crowd out the real changes (which agy made outside Claude's tools).
+4. When every PLAN of the layer is good, run `agy-run next` again. That accepts the
+   layer and starts the next one (background). If the report said **last layer**, it
+   only accepts: run `agy-run next && agy-run clean` in the foreground, in one call.
 
 Scope violations and failed validation were already sent back to agy once by the
 runner. If they persist, treat them as larger issues. `OUT OF SCOPE (agy or you)` may be
@@ -69,19 +77,31 @@ the user's own edits made during the run: ask before reverting files you did not
 - `BLOCKED` — read agy's report. If the plan was missing a decision you can make,
   clarify that PLAN in the run's `blueprint.md`, `undo`, `next`. If the decision is the
   user's, ask them.
+- `BLOCKED` with `contract file ... already exists` — the runner wrote nothing and agy
+  did not run. Move that contract's signatures into the PLAN text of the run's
+  `blueprint.md`, then `agy-run undo PLAN-XX && agy-run next` in one call (background).
+- `agy:UNKNOWN` — agy stopped without a report twice. Check the diff: if the work is
+  complete, accept with `next`; otherwise send findings with `fix`.
 - `FAILED` — agy crashed or timed out; partial changes are listed. Usually `undo` + `next`.
 - `NEEDS-CLAUDE` — an `executor: claude` PLAN: implement it yourself from its section,
   then `agy-run next`.
 
 ## Finish
 
-On `ALL DONE`:
-1. Summarize for the user in a few lines: what each PLAN delivered, anything you fixed
-   yourself, anything left open.
-2. Give the `## Checklist test tay` from the blueprint.
-3. Remind them the changes are uncommitted in their working tree, for them to test and
-   commit.
-4. Run `agy-run clean` to remove the checkpoint refs.
+On `ALL DONE` (it lists `files changed by agy`):
+1. Show the diff: if `mcp__ccd_view__show_pane` exists (load it with ToolSearch
+   `select:mcp__ccd_view__show_pane` when it is deferred), call it with
+   `pane: "diff"`, `diff_scope: "uncommitted"` and `path` set to the main changed file.
+2. Summarize for the user in a few lines: what each PLAN delivered, with the changed
+   source files as links, anything you fixed yourself, anything left open.
+3. Give the `## Checklist test tay` from the blueprint.
+4. Remind them the changes are uncommitted in their working tree, for them to test and
+   commit. Say that the app's "Edited files" card and its Undo cover only Claude's own
+   edits, not agy's code: to roll back a PLAN use `agy-run undo PLAN-XX` (before
+   `clean`) or git.
+5. `agy-run clean` removes the checkpoint refs (already done if you chained it above).
+6. Each task in a fresh session costs less (context is re-sent on every call): suggest
+   a new session or `/clear` before the next feature.
 
 ## Never
 

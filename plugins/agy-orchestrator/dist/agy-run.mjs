@@ -7855,6 +7855,13 @@ function fixPrompt(plan, findings, source) {
     'When done, output the same "## Result: DONE | BLOCKED" final report as before.'
   ].join("\n\n");
 }
+function continuePrompt(plan) {
+  return [
+    `# Continue ${plan.id}`,
+    'You ended your turn without the final "## Result:" report. The Recon report is not a stopping point.',
+    "Continue now in this conversation: implement everything the PLAN asks that is not done yet (Step 2), self-check (Step 3), and end with the final report."
+  ].join("\n\n");
+}
 function parseReport(response) {
   const idx = response.search(/^#{1,3}\s*Result:/im);
   const text = (idx >= 0 ? response.slice(idx) : response).trim();
@@ -7985,17 +7992,43 @@ ${check.validate.output}
   return parts.length ? parts.join("\n\n") : void 0;
 }
 function writeContracts(root, plan) {
+  const pending = [];
   for (const c of plan.contracts) {
     const abs = path6.join(root, c.file);
     if (existsSync6(abs)) {
       const current = readFileSync4(abs, "utf8").replace(/\r\n/g, "\n");
       if (current === c.content) continue;
-      return `contract file ${c.file} already exists with different content; the plan must not overwrite it`;
+      return `contract file ${c.file} already exists with different content; contracts are only for new files; nothing was written \u2014 move its signatures into the PLAN text, then \`agy-run undo ${plan.id}\` and \`agy-run next\``;
     }
+    pending.push({ abs, content: c.content });
+  }
+  for (const { abs, content } of pending) {
     mkdirSync3(path6.dirname(abs), { recursive: true });
-    writeFileSync3(abs, c.content);
+    writeFileSync3(abs, content);
   }
   return void 0;
+}
+var MODEL_CACHE_MS = 24 * 60 * 6e4;
+function resolveModel(root, agy, effort) {
+  const file = path6.join(root, AGY_DIR, "models.json");
+  let cache = {};
+  try {
+    cache = JSON.parse(readFileSync4(file, "utf8"));
+  } catch {
+  }
+  const hit = cache[effort];
+  if (hit && Date.now() - hit.at < MODEL_CACHE_MS) return hit.model;
+  let flash = newestFlash(agy, effort);
+  if (!flash.model) flash = newestFlash(agy, effort);
+  if (!flash.model) {
+    if (hit) return hit.model;
+    throw new Error(flash.error);
+  }
+  cache[effort] = { model: flash.model, at: Date.now() };
+  mkdirSync3(path6.dirname(file), { recursive: true });
+  writeFileSync3(file, `${JSON.stringify(cache, null, 2)}
+`);
+  return flash.model;
 }
 function tokens(turn) {
   const u = turn?.usage;
@@ -8049,31 +8082,42 @@ async function executeAgyPlan(root, dir, state, bp, plan) {
 }
 async function finishTurn(root, dir, state, bp, plan, firstTurn, checkpoint, allowAutoFix) {
   let turn = firstTurn;
+  let continued = false;
   const logFile = path6.join(dir, `${plan.id}.log`);
+  const resume = (prompt) => {
+    setPlan(state, plan.id, { turns: state.plans[plan.id].turns + 1 });
+    return runTurn({ agy: findAgyOrThrow(), cwd: root, prompt, model: state.model, conversationId: turn.conversationId, logFile });
+  };
   for (; ; ) {
     if (turn.status !== "SUCCESS") {
-      const note = `agy turn ended with ${turn.status}${turn.error ? `: ${turn.error}` : ""}${turn.stderrTail ? ` | stderr: ${tail(turn.stderrTail, 3)}` : ""}`;
+      const note2 = `agy turn ended with ${turn.status}${turn.error ? `: ${turn.error}` : ""}${turn.stderrTail ? ` | stderr: ${tail(turn.stderrTail, 3)}` : ""}`;
       const check2 = await checkPlan(root, dir, state.run, plan, checkpoint, { ...bp, validate: [] });
-      setPlan(state, plan.id, { status: "failed", note });
-      return { plan, turn, check: check2, note };
+      setPlan(state, plan.id, { status: "failed", note: note2, files: check2.changed.map((c) => c.file) });
+      return { plan, turn, check: check2, note: note2 };
     }
     const report = parseReport(turn.response);
     writeFileSync3(path6.join(dir, `${plan.id}.report.md`), report.text);
+    if (report.result === "UNKNOWN" && !continued && turn.conversationId) {
+      continued = true;
+      turn = await resume(continuePrompt(plan));
+      continue;
+    }
     if (report.result === "BLOCKED") {
       const check2 = await checkPlan(root, dir, state.run, plan, checkpoint, { ...bp, validate: [] });
-      setPlan(state, plan.id, { status: "blocked", note: "agy reported BLOCKED" });
+      setPlan(state, plan.id, { status: "blocked", note: "agy reported BLOCKED", files: check2.changed.map((c) => c.file) });
       return { plan, turn, check: check2, reportText: report.text, agyResult: report.result };
     }
     const check = await checkPlan(root, dir, state.run, plan, checkpoint, bp);
     const findings = runnerFindings(check);
     const ps = state.plans[plan.id];
     if (findings && allowAutoFix && ps.autoFixes < MAX_AUTO_FIXES && turn.conversationId) {
-      setPlan(state, plan.id, { autoFixes: ps.autoFixes + 1, turns: ps.turns + 1 });
-      turn = await runTurn({ agy: findAgyOrThrow(), cwd: root, prompt: fixPrompt(plan, findings, "runner"), model: state.model, conversationId: turn.conversationId, logFile });
+      setPlan(state, plan.id, { autoFixes: ps.autoFixes + 1 });
+      turn = await resume(fixPrompt(plan, findings, "runner"));
       continue;
     }
-    setPlan(state, plan.id, { status: "review", note: findings ? "mechanical checks still failing after auto-fix" : void 0 });
-    return { plan, turn, check, reportText: report.text, agyResult: report.result, note: state.plans[plan.id].note };
+    const note = findings ? "mechanical checks still failing after auto-fix" : report.result === "UNKNOWN" ? "agy ended without a final report even after being told to continue; the work may be incomplete" : void 0;
+    setPlan(state, plan.id, { status: "review", note, files: check.changed.map((c) => c.file) });
+    return { plan, turn, check, reportText: report.text, agyResult: report.result, note };
   }
 }
 function findAgyOrThrow() {
@@ -8109,10 +8153,8 @@ function cmdImport(cwd, file) {
   const source = path6.resolve(cwd, file);
   const bp = parseBlueprint(readFileSync4(source, "utf8"));
   const agy = findAgyOrThrow();
-  const effort = bp.effort ?? "high";
-  const flash = newestFlash(agy, effort);
-  if (!flash.model) throw new Error(flash.error);
   ensureExcluded(root);
+  const model = resolveModel(root, agy, bp.effort ?? "high");
   const run = newRunId(bp.title);
   const dir = runDir(root, run);
   mkdirSync3(dir, { recursive: true });
@@ -8121,7 +8163,7 @@ function cmdImport(cwd, file) {
     version: 1,
     run,
     root,
-    model: flash.model,
+    model,
     createdAt: (/* @__PURE__ */ new Date()).toISOString(),
     plans: Object.fromEntries(bp.plans.map((p) => [p.id, { status: "pending", autoFixes: 0, fixes: 0, turns: 0 }]))
   };
@@ -8131,7 +8173,7 @@ function cmdImport(cwd, file) {
     code: 0,
     text: `RUN ${run}
 title: ${bp.title}
-model: ${flash.model}
+model: ${model}
 validate: ${bp.validate.join(" ; ") || "(none)"}
 ${lay}
 NEXT: agy-run next   (latest run; or --run ${run})`
@@ -8160,14 +8202,15 @@ async function cmdNext(cwd, runArg) {
       results.push(r);
       if (state.plans[plan.id].status === "blocked" || state.plans[plan.id].status === "failed") break;
     }
-    const attention = results.some((r) => ["blocked", "failed", "needs-claude"].includes(state.plans[r.plan.id].status));
+    const attention = results.some((r) => ["blocked", "failed", "needs-claude"].includes(state.plans[r.plan.id].status) || r.agyResult === "UNKNOWN");
     const header = attention ? "NEEDS ATTENTION" : "READY FOR REVIEW";
+    const lastLayer = bp.plans.every((p) => state.plans[p.id].status !== "pending");
     return {
       code: attention ? 2 : 0,
       text: [
         `${header}  run ${state.run}  model ${state.model}`,
         ...results.map((r) => formatPlan(state, r)),
-        "NEXT: review \u2192 `agy-run next` (accept + continue) | `agy-run fix <PLAN> <findings.md>` | `agy-run undo <PLAN>`"
+        lastLayer ? "NEXT: review \u2192 last layer: `agy-run next` only accepts (returns at once; run it in the foreground, then `agy-run clean`) | `agy-run fix <PLAN> <findings.md>` | `agy-run undo <PLAN>`" : "NEXT: review \u2192 `agy-run next` (accept + start the next layer) | `agy-run fix <PLAN> <findings.md>` | `agy-run undo <PLAN>`"
       ].join("\n")
     };
   } finally {
@@ -8177,9 +8220,16 @@ async function cmdNext(cwd, runArg) {
 function summarize(state, bp) {
   const all = bp.plans.map((p) => `${p.id} ${state.plans[p.id].status}${state.plans[p.id].note ? ` (${state.plans[p.id].note})` : ""}`);
   if (bp.plans.every((p) => state.plans[p.id].status === "accepted")) {
-    return { code: 0, text: `ALL DONE  run ${state.run}
-${all.join("\n")}
-NEXT: give the user the manual test checklist; then \`agy-run clean\`` };
+    const files = [...new Set(bp.plans.flatMap((p) => state.plans[p.id].files ?? []))].sort();
+    return {
+      code: 0,
+      text: [
+        `ALL DONE  run ${state.run}`,
+        ...all,
+        files.length ? `files changed by agy (uncommitted): ${files.join(", ")}` : "",
+        "NEXT: show the uncommitted diff, give the user the manual test checklist; then `agy-run clean`"
+      ].filter(Boolean).join("\n")
+    };
   }
   return { code: 2, text: `NOTHING RUNNABLE  run ${state.run}
 ${all.join("\n")}
@@ -8205,7 +8255,7 @@ async function cmdFix(cwd, planId, findingsFile, runArg) {
     });
     const r = await finishTurn(root, dir, state, bp, plan, turn, ps.checkpoint, false);
     const st = state.plans[plan.id].status;
-    return { code: st === "review" ? 0 : 2, text: `FIX ${plan.id} (round ${state.plans[plan.id].fixes})
+    return { code: st === "review" && r.agyResult !== "UNKNOWN" ? 0 : 2, text: `FIX ${plan.id} (round ${state.plans[plan.id].fixes})
 ${formatPlan(state, r)}` };
   } finally {
     release();

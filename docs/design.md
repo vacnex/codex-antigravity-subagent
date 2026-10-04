@@ -76,9 +76,17 @@ See `plugins/agy-orchestrator/skills/agy-plan/`. Key points:
 
 | Size | Handling |
 |---|---|
-| Tiny (a few lines, one file) | Claude does it directly; delegating would cost more |
-| Medium | Blueprint with a single short PLAN (still precedents + placement map) |
+| Small (< ~150 changed lines, or 1–2 files) | Claude does it directly unless the user asks for agy |
+| Medium (~150–400 lines) | Blueprint with a single PLAN (still precedents + placement map) |
 | Large | Blueprint with several PLANs and `depends_on` |
+
+Measured on 2026-10-04 with a demo todo CLI (Opus 5.5 planning/review, Gemini 3.8 Flash
+medium implementing): tasks of +12, +116 and +201 lines cost Claude 13, 15 and 20 API
+calls, about 1.5–2x what Claude doing the work itself would have cost. Two causes:
+every call re-sends a ~60k+ token context, so the call count dominates; and the
+blueprints were a third to three quarters the size of the diff, so little Claude output
+was saved. Hence the threshold above, the "blueprint ≤ ~1/3 of the diff" rule in
+`agy-plan`, and fewer runner round trips in `agy-execute`.
 
 ## Workspace mode: in place, with checkpoints
 
@@ -111,7 +119,12 @@ check | import <file> | next | fix <PLAN> <findings.md> | undo <PLAN> | status |
 - Output is short plain text (cheaper than JSON for Claude); diffs, logs, agy reports
   and validate output are files in `.agy/runs/<run>/`.
 - Exit codes: 0 ready for review / all done, 2 needs attention, 1 error.
-- `state.json` is runner-internal: per-PLAN status, conversation id, checkpoint, counts.
+- `state.json` is runner-internal: per-PLAN status, conversation id, checkpoint, counts,
+  changed files (listed again on `ALL DONE`).
+- Handled without Claude: agy ending its turn after the Recon report (one "continue"
+  turn in the same conversation; still no report → needs attention), and `agy models`
+  hanging (newest Flash cached per effort in `.agy/models.json` for 24 h; a stale cache
+  is used when the lookup fails). Contracts are written all-or-nothing.
 
 ## Execution (`agy-execute`) — option C: gate per dependency layer
 

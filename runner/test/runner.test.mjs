@@ -208,6 +208,85 @@ test('fix continues the conversation; undo restores plan files and keeps user WI
   assert.match(run(dir, scen, 'status').out, /PLAN-01 pending/);
 });
 
+test('a turn that stops after Recon is continued once in the same conversation', () => {
+  const dir = makeRepo();
+  const scen = scenario(dir, [
+    { response: '## Recon\n- Precedents read: src/app.js\n- Conflicts with the PLAN: none' },
+    { write: { 'src/greeter.js': 'x\n' }, response: DONE },
+  ]);
+  importBlueprint(dir, scen);
+  const r = run(dir, scen, 'next');
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, /PLAN-01 REVIEW\s+agy:DONE/);
+  const p = prompts(scen);
+  assert.equal(p.length, 2);
+  assert.match(p[1].prompt, /Recon report is not a stopping point/);
+  assert.ok(p[1].args.includes('conv-0'));
+  assert.match(run(dir, scen, 'status').out, /PLAN-01 review\s+turns:2/);
+});
+
+test('no final report even after continuing needs attention', () => {
+  const dir = makeRepo();
+  const scen = scenario(dir, [{ response: '## Recon\n...' }, { response: 'still thinking' }]);
+  importBlueprint(dir, scen);
+  const r = run(dir, scen, 'next');
+  assert.equal(r.code, 2, r.out);
+  assert.match(r.out, /NEEDS ATTENTION/);
+  assert.match(r.out, /agy:UNKNOWN/);
+  assert.match(r.out, /without a final report/);
+});
+
+test('contract conflict writes no contract file at all', () => {
+  const dir = makeRepo();
+  writeFileSync(path.join(dir, 'src', 'greeter.js'), 'export const existing = 1;\n');
+  const scen = scenario(dir, []);
+  const dts = 'export declare function greet(name: string): string;\n```\n';
+  const bp = BLUEPRINT().replace(dts, `${dts}\n\`\`\`js file=src/greeter.js\nexport function greet() {}\n\`\`\`\n`);
+  importBlueprint(dir, scen, bp);
+  const r = run(dir, scen, 'next');
+  assert.equal(r.code, 2, r.out);
+  assert.match(r.out, /contract file src\/greeter\.js already exists/);
+  // the contract listed before the conflicting one was not written either
+  assert.ok(!existsSync(path.join(dir, 'src/contracts/greeter.d.ts')));
+  assert.equal(prompts(scen).length, 0);
+});
+
+test('model is cached per effort and reused when agy models fails', () => {
+  const dir = makeRepo();
+  const scen = scenario(dir, []);
+  importBlueprint(dir, scen);
+  const cacheFile = path.join(dir, '.agy', 'models.json');
+  const cache = JSON.parse(readFileSync(cacheFile, 'utf8'));
+  assert.equal(cache.high.model, 'gemini-3.8-flash-high');
+  // stale cache + failing `agy models` → falls back to the cached slug
+  cache.high.at = 0;
+  writeFileSync(cacheFile, JSON.stringify(cache));
+  const bpFile = path.join(dir, '..', `${path.basename(dir)}.blueprint.md`);
+  const r = spawnSync(process.execPath, [RUNNER, 'import', bpFile], {
+    cwd: dir,
+    encoding: 'utf8',
+    env: { ...process.env, AGY_PATH: FAKE_AGY, FAKE_AGY_SCENARIO: scen, FAKE_AGY_MODELS_FAIL: '1' },
+  });
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /model: gemini-3\.8-flash-high/);
+});
+
+test('ALL DONE lists the files agy changed; the last layer is announced', () => {
+  const dir = makeRepo();
+  const scen = scenario(dir, [
+    { write: { 'src/greeter.js': 'x\n' }, response: DONE },
+    { write: { 'src/use.js': 'y\n' }, response: DONE },
+  ]);
+  importBlueprint(dir, scen);
+  let r = run(dir, scen, 'next');
+  assert.match(r.out, /accept \+ start the next layer/);
+  r = run(dir, scen, 'next');
+  assert.match(r.out, /last layer: `agy-run next` only accepts/);
+  r = run(dir, scen, 'next');
+  assert.match(r.out, /ALL DONE/);
+  assert.match(r.out, /files changed by agy \(uncommitted\): src\/contracts\/greeter\.d\.ts, src\/greeter\.js, src\/use\.js/);
+});
+
 test('invalid blueprint is rejected with a clear message', () => {
   const dir = makeRepo();
   const scen = scenario(dir, []);

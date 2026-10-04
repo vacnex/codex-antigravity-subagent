@@ -14,6 +14,7 @@ if (args[0] === '--version') {
 }
 if (args[0] === 'models') {
   console.error('Fetching available models...');
+  if (process.env.FAKE_AGY_MODELS_FAIL) process.exit(1);
   console.log('gemini-3.7-flash-high\tGemini 3.7 Flash (High)');
   console.log('gemini-3.8-flash-high\tGemini 3.8 Flash (High)');
   console.log('gemini-3.8-flash-low\tGemini 3.8 Flash (Low)');
