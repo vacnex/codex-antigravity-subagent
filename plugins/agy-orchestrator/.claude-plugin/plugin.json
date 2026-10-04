@@ -1,0 +1,9 @@
+{
+  "name": "agy-orchestrator",
+  "displayName": "agy orchestrator",
+  "version": "0.1.0",
+  "description": "Claude plans and reviews; the Antigravity CLI (agy) implements with the newest Gemini Flash model.",
+  "author": { "name": "tghuy" },
+  "license": "MIT",
+  "keywords": ["antigravity", "agy", "delegation", "orchestration"]
+}

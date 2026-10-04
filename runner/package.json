@@ -1,0 +1,17 @@
+{
+  "name": "agy-run",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "esbuild src/cli.ts --bundle --platform=node --target=node20 --format=esm --outfile=../plugins/agy-orchestrator/dist/agy-run.mjs --banner:js=\"import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);\"",
+    "test": "npm run build && node --test test/*.test.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.6.0",
+    "yaml": "^2.6.0"
+  }
+}

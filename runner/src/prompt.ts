@@ -1,0 +1,58 @@
+import { existsSync, readFileSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+import type { Blueprint, Plan } from './blueprint.js';
+
+function workerBrief(): string {
+  // dist/agy-run.mjs → ../templates/worker-brief.md inside the plugin.
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  for (const p of [path.join(here, '..', 'templates', 'worker-brief.md'), path.join(here, '..', '..', 'plugins', 'agy-orchestrator', 'templates', 'worker-brief.md')]) {
+    if (existsSync(p)) return readFileSync(p, 'utf8').replace(/^# .*\n+/, '');
+  }
+  throw new Error('worker-brief.md not found next to the runner');
+}
+
+function list(items: string[]): string {
+  return items.length ? items.map((i) => `- ${i}`).join('\n') : '- (none)';
+}
+
+export function planPrompt(bp: Blueprint, plan: Plan): string {
+  return [
+    `# Task: ${plan.id} of "${bp.title}"`,
+    workerBrief().trim(),
+    '## Scope (enforced by the runner after you finish)',
+    `Write: \n${list(plan.write)}`,
+    `Wiring edits allowed in: \n${list(plan.wiring)}`,
+    `Read-only: \n${list(plan.readOnly)}`,
+    plan.contracts.length ? `Contract files already written for you (do not change signatures):\n${list(plan.contracts.map((c) => c.file))}` : '',
+    '## Validation',
+    bp.validate.length
+      ? `You cannot run shell commands. After you finish, the runner runs:\n${list(bp.validate)}\nand sends you any errors.`
+      : 'You cannot run shell commands. There is no validate command for this blueprint.',
+    '## The PLAN',
+    plan.body,
+  ]
+    .filter(Boolean)
+    .join('\n\n');
+}
+
+export function fixPrompt(plan: Plan, findings: string, source: 'runner' | 'reviewer'): string {
+  const who = source === 'runner' ? 'The runner checked your work and found problems' : 'The reviewer found problems in your work';
+  return [
+    `# Fix request for ${plan.id}`,
+    `${who}. Fix exactly these, keep everything else as is, stay inside the same scope, and do not run shell commands.`,
+    findings.trim(),
+    'When done, output the same "## Result: DONE | BLOCKED" final report as before.',
+  ].join('\n\n');
+}
+
+export type AgyReport = { result: 'DONE' | 'BLOCKED' | 'UNKNOWN'; text: string };
+
+/** Extract the final "## Result:" report from agy's response. */
+export function parseReport(response: string): AgyReport {
+  const idx = response.search(/^#{1,3}\s*Result:/im);
+  const text = (idx >= 0 ? response.slice(idx) : response).trim();
+  const m = /^#{1,3}\s*Result:\s*\**\s*(DONE|BLOCKED)/im.exec(text);
+  return { result: (m?.[1] as 'DONE' | 'BLOCKED') ?? 'UNKNOWN', text };
+}

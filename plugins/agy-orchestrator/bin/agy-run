@@ -1,0 +1,3 @@
+#!/bin/sh
+# Entry point on the Bash tool PATH while the plugin is enabled.
+exec node "$(dirname "$0")/../dist/agy-run.mjs" "$@"

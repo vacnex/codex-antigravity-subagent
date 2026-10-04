@@ -1,0 +1,11 @@
+{
+  "name": "agy-orchestrator",
+  "owner": { "name": "tghuy" },
+  "plugins": [
+    {
+      "name": "agy-orchestrator",
+      "source": "./plugins/agy-orchestrator",
+      "description": "Claude plans and reviews; the Antigravity CLI (agy) implements."
+    }
+  ]
+}
