@@ -106,9 +106,19 @@ better done yourself.
 - Make lint fail on warnings (eslint: append `--max-warnings 0`, e.g.
   `pnpm --dir web lint --max-warnings 0`) when the project keeps lint warning-free.
   Otherwise warnings pass validation and you end up fixing them yourself.
-- Do NOT plan new test files unless the user asks. When they do, put the test files in
-  `write` (agy only touches tests listed there). The user tests features manually:
-  write a short `## Checklist test tay` (steps → expected result) after the last PLAN.
+- **The user tests by hand.** Always write a `## Checklist test tay` after the last
+  PLAN (steps → expected result) that covers the feature's edge cases, so it can stand
+  in for automated tests.
+- Do NOT plan new automated tests by default. agy cannot run tests, so tests that need
+  trial and error land on Claude at the most expensive point of the run (a run lost
+  ~1.6M tokens to a router mock in a Nuxt test).
+- If the user asks for tests, plan them only for pure logic (domain/util functions,
+  parsers, stores without framework runtime) and only when a test of the same kind
+  already exists to imitate (name it in `### Làm theo mẫu`). Leave UI, routing,
+  timing and integration behaviour to the manual checklist, and say so in one line of
+  the report.
+- Existing tests still run through `validate`. When the change will break existing
+  tests, put those test files in `write` so agy updates them.
 
 ## Language
 

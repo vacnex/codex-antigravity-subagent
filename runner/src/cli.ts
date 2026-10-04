@@ -4,12 +4,12 @@ import path from 'node:path';
 import { agyVersion, findAgy, msixShadowCopies, newestFlash, runTurn, type TurnResult } from './agy.js';
 import { BlueprintError, inScope, layers, parseBlueprint, type Blueprint, type Plan } from './blueprint.js';
 import { changes, deleteRefs, diffText, ensureExcluded, repoRoot, restoreFiles, setRef, snapshot, type Change } from './git.js';
-import { runCommand, tail } from './proc.js';
+import { failureExcerpt, runCommand, tail } from './proc.js';
 import { continuePrompt, fixPrompt, parseReport, planPrompt } from './prompt.js';
 import { acquireLock, AGY_DIR, latestRun, loadState, newRunId, runDir, saveState, setPlan, type RunState } from './state.js';
 
 const VALIDATE_TIMEOUT_MS = 20 * 60_000;
-const MAX_AUTO_FIXES = 1;
+const MAX_AUTO_FIXES = 2;
 
 class UsageError extends Error {}
 
@@ -67,7 +67,7 @@ async function checkPlan(root: string, dir: string, run: string, plan: Plan, che
     for (const command of bp.validate) {
       const r = await runCommand(command, root, VALIDATE_TIMEOUT_MS);
       log.push(`$ ${command}\n${r.stdout}${r.stderr}`);
-      if (r.code !== 0 || r.timedOut) failures.push({ command, output: tail(`${r.stdout}\n${r.stderr}`, 60) + (r.timedOut ? '\n(timed out)' : '') });
+      if (r.code !== 0 || r.timedOut) failures.push({ command, output: failureExcerpt(`${r.stdout}\n${r.stderr}`) +(r.timedOut ? '\n(timed out)' : '') });
     }
     validate = { ok: failures.length === 0, skipped: false, failures };
     writeFileSync(path.join(dir, `${plan.id}.validate.txt`), log.join('\n'));
@@ -203,6 +203,7 @@ async function finishTurn(
 ): Promise<PlanRun> {
   let turn = firstTurn;
   let continued = false;
+  let lastFindings: string | undefined;
   const logFile = path.join(dir, `${plan.id}.log`);
   const resume = (prompt: string) => {
     setPlan(state, plan.id, { turns: state.plans[plan.id].turns + 1 });
@@ -231,7 +232,10 @@ async function finishTurn(
     const check = await checkPlan(root, dir, state.run, plan, checkpoint, bp);
     const findings = runnerFindings(check);
     const ps = state.plans[plan.id];
-    if (findings && allowAutoFix && ps.autoFixes < MAX_AUTO_FIXES && turn.conversationId) {
+    // A second round only when the first one changed the errors; the same errors twice means agy is stuck.
+    const progressing = ps.autoFixes === 0 || findings !== lastFindings;
+    if (findings && allowAutoFix && ps.autoFixes < MAX_AUTO_FIXES && progressing && turn.conversationId) {
+      lastFindings = findings;
       setPlan(state, plan.id, { autoFixes: ps.autoFixes + 1 });
       turn = await resume(fixPrompt(plan, findings, 'runner'));
       continue;

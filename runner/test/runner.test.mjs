@@ -182,6 +182,39 @@ test('every failing validate command goes into the same auto-fix round', () => {
   assert.equal((r.out.match(/validate failed:/g) ?? []).length, 2);
 });
 
+test('the fix prompt carries the failure lines, not the noisy tail; changed errors get a second round', () => {
+  const dir = makeRepo();
+  // validate fails differently depending on the greeter content; lots of noise after the failure
+  const check = path.join(dir, '..', `${path.basename(dir)}.check.mjs`);
+  writeFileSync(check, [
+    "import { readFileSync } from 'node:fs';",
+    "const g = readFileSync('src/greeter.js', 'utf8');",
+    "if (g === 'ok\\n') process.exit(0);",
+    "console.log(' × greets by name 12ms');",
+    "console.log(`AssertionError: expected 'hi' to be '${g.trim()}'`);",
+    "for (let i = 0; i < 200; i++) console.error('  error: [Getter/Setter],');",
+    "console.log('      Tests  1 failed | 9 passed (10)');",
+    'process.exit(1);',
+  ].join('\n'));
+  const scen = scenario(dir, [
+    { write: { 'src/greeter.js': 'v1\n' }, response: DONE },
+    { write: { 'src/greeter.js': 'v2\n' }, response: DONE },
+    { write: { 'src/greeter.js': 'ok\n' }, response: DONE },
+  ]);
+  importBlueprint(dir, scen, BLUEPRINT(`node ${check.replace(/\\/g, '/')}`));
+  const r = run(dir, scen, 'next');
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, /validate:PASS/);
+  assert.match(r.out, /autofix:2/);
+  const p = prompts(scen);
+  assert.equal(p.length, 3);
+  assert.match(p[1].prompt, /× greets by name/);
+  assert.match(p[1].prompt, /expected 'hi' to be 'v1'/);
+  assert.match(p[1].prompt, /Tests {2}1 failed/);
+  assert.ok((p[1].prompt.match(/Getter\/Setter/g) ?? []).length < 10, 'noise trimmed');
+  assert.match(p[2].prompt, /to be 'v2'/);
+});
+
 test('blocked report stops the layer with exit code 2', () => {
   const dir = makeRepo();
   const scen = scenario(dir, [{ response: '## Recon\n...\n## Result: BLOCKED\n- Conflicts with the PLAN: no Result type exists' }]);

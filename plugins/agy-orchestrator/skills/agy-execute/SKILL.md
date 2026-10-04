@@ -70,8 +70,19 @@ For each PLAN in `REVIEW`:
    layer and starts the next one (background). If the report said **last layer**, it
    only accepts: run `agy-run next && agy-run clean` in the foreground, in one call.
 
-Scope violations and failed validation were already sent back to agy once by the
-runner. If they persist, treat them as larger issues. `OUT OF SCOPE (agy or you)` may be
+Scope violations and failed validation were already sent back to agy by the runner
+(with the failure lines; a second round when the first one changed the errors). If they
+persist, treat them as larger issues.
+
+**Validation still failing and the cause is not obvious from the report:** debugging in
+this session is the most expensive thing in the run, because every attempt re-sends a
+large context. Keep it bounded:
+- Run only the failing command or test file, with output filtered to the failures;
+  never insert debug prints with `sed -i` into source or test files.
+- After about 5 attempts without a clear cause, stop. If the failure is in a test that
+  agy wrote and the feature itself looks right, remove or skip that test (say so) and
+  move its scenario into the manual checklist; otherwise send what you learned to agy
+  with `fix`, or ask the user. `OUT OF SCOPE (agy or you)` may be
 the user's own edits made during the run: ask before reverting files you did not plan.
 
 ## Needs attention

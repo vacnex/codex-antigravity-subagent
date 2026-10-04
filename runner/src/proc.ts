@@ -91,6 +91,50 @@ export function killTree(pid: number | undefined): void {
   }
 }
 
+// Lines that carry the actual failure in common test/build/lint tools (vitest/jest, tsc,
+// eslint, dotnet/msbuild, pytest, go test).
+// Lines that pin down a failure (assertions, compiler/lint errors, failed test names) and
+// lines that only point at one (warnings, generic "Failed to ..."). Pinning lines go first.
+// ERROR_LINE starts a block that continues with its diff/code frame; PIN_LINE is one line.
+const ERROR_LINE = /AssertionError|\w*Error: |\berror (TS|CS)\d+|^\s*\d+:\d+\s+error\s|: error |panic:|Traceback/;
+const PIN_LINE = /^E\s|(^|\s)(×|✗|✕)\s/;
+const HINT_LINE = /(^|\s)(FAIL|FAILED)\b|❯ .+:\d+/;
+const SUMMARY_LINE = /^\s*(Tests?|Test Files|✖ \d+ problems?|Build FAILED|\d+ Error\(s\))\b/;
+const ANSI = /\x1b\[[0-9;]*m/g;
+
+/**
+ * The part of a failed command's output worth sending to agy: failure lines plus a few
+ * lines after each (assertion diffs, code frames), each distinct block once, then the
+ * summary lines. Falls back to the tail when nothing matches.
+ */
+export function failureExcerpt(text: string, maxLines = 80): string {
+  const all = text.replace(ANSI, '').replace(/\r\n/g, '\n').trimEnd().split('\n');
+  const blocks: { start: number; lines: string[]; pin: boolean }[] = [];
+  const seen = new Set<string>();
+  let coveredUntil = -1;
+  all.forEach((line, i) => {
+    if (i <= coveredUntil) return;
+    const error = ERROR_LINE.test(line);
+    const pin = error || PIN_LINE.test(line);
+    if (!pin && !HINT_LINE.test(line)) return;
+    const lines = all.slice(i, i + (error ? 12 : 1));
+    const key = lines.join('\n').trim();
+    if (seen.has(key)) return; // repeated dumps and retries say nothing new
+    seen.add(key);
+    if (error) coveredUntil = i + lines.length - 1;
+    blocks.push({ start: i, lines, pin });
+  });
+  if (blocks.length === 0) return tail(text, 60);
+  const ordered = [...blocks.filter((b) => b.pin), ...blocks.filter((b) => !b.pin)];
+  const picked: string[] = [];
+  for (const b of ordered) {
+    if (picked.length + b.lines.length > maxLines) break;
+    picked.push(...b.lines, '…');
+  }
+  const summary = [...new Set(all.filter((l) => SUMMARY_LINE.test(l)))];
+  return [...picked, ...summary].join('\n');
+}
+
 export function tail(text: string, lines: number): string {
   const all = text.replace(/\r\n/g, '\n').trimEnd().split('\n');
   return all.slice(-lines).join('\n');

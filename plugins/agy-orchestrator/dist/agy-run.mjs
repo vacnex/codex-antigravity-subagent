@@ -7457,6 +7457,38 @@ function killTree(pid) {
   } catch {
   }
 }
+var ERROR_LINE = /AssertionError|\w*Error: |\berror (TS|CS)\d+|^\s*\d+:\d+\s+error\s|: error |panic:|Traceback/;
+var PIN_LINE = /^E\s|(^|\s)(×|✗|✕)\s/;
+var HINT_LINE = /(^|\s)(FAIL|FAILED)\b|❯ .+:\d+/;
+var SUMMARY_LINE = /^\s*(Tests?|Test Files|✖ \d+ problems?|Build FAILED|\d+ Error\(s\))\b/;
+var ANSI = /\x1b\[[0-9;]*m/g;
+function failureExcerpt(text, maxLines = 80) {
+  const all = text.replace(ANSI, "").replace(/\r\n/g, "\n").trimEnd().split("\n");
+  const blocks = [];
+  const seen = /* @__PURE__ */ new Set();
+  let coveredUntil = -1;
+  all.forEach((line, i) => {
+    if (i <= coveredUntil) return;
+    const error = ERROR_LINE.test(line);
+    const pin = error || PIN_LINE.test(line);
+    if (!pin && !HINT_LINE.test(line)) return;
+    const lines = all.slice(i, i + (error ? 12 : 1));
+    const key = lines.join("\n").trim();
+    if (seen.has(key)) return;
+    seen.add(key);
+    if (error) coveredUntil = i + lines.length - 1;
+    blocks.push({ start: i, lines, pin });
+  });
+  if (blocks.length === 0) return tail(text, 60);
+  const ordered = [...blocks.filter((b) => b.pin), ...blocks.filter((b) => !b.pin)];
+  const picked = [];
+  for (const b of ordered) {
+    if (picked.length + b.lines.length > maxLines) break;
+    picked.push(...b.lines, "\u2026");
+  }
+  const summary = [...new Set(all.filter((l) => SUMMARY_LINE.test(l)))];
+  return [...picked, ...summary].join("\n");
+}
 function tail(text, lines) {
   const all = text.replace(/\r\n/g, "\n").trimEnd().split("\n");
   return all.slice(-lines).join("\n");
@@ -7928,7 +7960,7 @@ function newRunId(title, now = /* @__PURE__ */ new Date()) {
 
 // src/cli.ts
 var VALIDATE_TIMEOUT_MS = 20 * 6e4;
-var MAX_AUTO_FIXES = 1;
+var MAX_AUTO_FIXES = 2;
 var UsageError = class extends Error {
 };
 function refFor(run, plan) {
@@ -7966,8 +7998,8 @@ async function checkPlan(root, dir, run, plan, checkpoint, bp) {
       const r = await runCommand(command2, root, VALIDATE_TIMEOUT_MS);
       log.push(`$ ${command2}
 ${r.stdout}${r.stderr}`);
-      if (r.code !== 0 || r.timedOut) failures.push({ command: command2, output: tail(`${r.stdout}
-${r.stderr}`, 60) + (r.timedOut ? "\n(timed out)" : "") });
+      if (r.code !== 0 || r.timedOut) failures.push({ command: command2, output: failureExcerpt(`${r.stdout}
+${r.stderr}`) + (r.timedOut ? "\n(timed out)" : "") });
     }
     validate = { ok: failures.length === 0, skipped: false, failures };
     writeFileSync3(path6.join(dir, `${plan.id}.validate.txt`), log.join("\n"));
@@ -8081,6 +8113,7 @@ async function executeAgyPlan(root, dir, state, bp, plan) {
 async function finishTurn(root, dir, state, bp, plan, firstTurn, checkpoint, allowAutoFix) {
   let turn = firstTurn;
   let continued = false;
+  let lastFindings;
   const logFile = path6.join(dir, `${plan.id}.log`);
   const resume = (prompt) => {
     setPlan(state, plan.id, { turns: state.plans[plan.id].turns + 1 });
@@ -8108,7 +8141,9 @@ async function finishTurn(root, dir, state, bp, plan, firstTurn, checkpoint, all
     const check = await checkPlan(root, dir, state.run, plan, checkpoint, bp);
     const findings = runnerFindings(check);
     const ps = state.plans[plan.id];
-    if (findings && allowAutoFix && ps.autoFixes < MAX_AUTO_FIXES && turn.conversationId) {
+    const progressing = ps.autoFixes === 0 || findings !== lastFindings;
+    if (findings && allowAutoFix && ps.autoFixes < MAX_AUTO_FIXES && progressing && turn.conversationId) {
+      lastFindings = findings;
       setPlan(state, plan.id, { autoFixes: ps.autoFixes + 1 });
       turn = await resume(fixPrompt(plan, findings, "runner"));
       continue;

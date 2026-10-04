@@ -4,7 +4,7 @@ Claude plans and reviews; the Antigravity CLI (`agy`, newest Gemini Flash) imple
 The goal is to save Claude quota: Claude spends it on decisions and review, agy on typing
 code.
 
-> Status: early (0.1.2). Design and decisions: [docs/design.md](docs/design.md).
+> Status: early (0.1.3). Design and decisions: [docs/design.md](docs/design.md).
 
 ## How it works
 

@@ -125,8 +125,26 @@ check | import <file> | next | fix <PLAN> <findings.md> | undo <PLAN> | status |
   turn in the same conversation; still no report → needs attention), and `agy models`
   hanging (newest Flash cached per effort in `.agy/models.json` for 24 h; a stale cache
   is used when the lookup fails). Contracts are written all-or-nothing.
-- Validation runs every command even after one fails, so the single auto-fix round
-  gets all lint/typecheck/test errors at once (a TSDC run lost a round to lint-first).
+- Validation runs every command even after one fails, and agy gets a failure excerpt
+  (assertion/compiler blocks, failed test names, summary; repeats dropped) instead of
+  the output tail, which in a TSDC run was 200 lines of Vue warning dumps. A second
+  auto-fix round runs only when the first one changed the errors.
+- Manual testing by the user is the default; automated tests only for pure logic with
+  an existing precedent. agy cannot run tests, so test trial-and-error lands on Claude:
+  TSDC task B (+552 lines, URL sync) cost Claude 84 calls / ~1.8M token-equivalents,
+  ~85% of it debugging a router mock in Nuxt tests.
+
+## Open experiment: letting agy run the validate commands
+
+Headless agy auto-denies every shell command unless `permissions.allow` holds a
+`command(<prefix>)` rule. Tested 2026-10-04 (agy 1.2.16): the rule works in the CLI
+settings `~/.gemini/antigravity-cli/settings.json` and matches by prefix
+(`command(node -e)` allowed `node -e "console.log(42)"`); the same rule in a project
+`.agents/settings.json` or `.gemini/settings.json` had no effect. Commands run in
+PowerShell with the user's profile. Letting agy run exactly the blueprint's validate
+commands (prefix → it can also run one test file) would move test/build trial-and-error
+to Gemini quota. Cost: the runner must add and remove rules in a global file, or the
+user adds them once per project.
 
 ## Execution (`agy-execute`) — option C: gate per dependency layer
 
