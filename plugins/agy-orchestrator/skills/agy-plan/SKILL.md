@@ -101,7 +101,11 @@ better done yourself.
 
 - `validate` = the project's existing build/typecheck/lint/test commands, one executable
   per line, runnable from the repo root, no `&&`, pipes or redirects. The runner runs
-  them after each PLAN; agy cannot run commands.
+  all of them after each PLAN and sends every failure back to agy in one auto-fix
+  round; agy cannot run commands.
+- Make lint fail on warnings (eslint: append `--max-warnings 0`, e.g.
+  `pnpm --dir web lint --max-warnings 0`) when the project keeps lint warning-free.
+  Otherwise warnings pass validation and you end up fixing them yourself.
 - Do NOT plan new test files unless the user asks. When they do, put the test files in
   `write` (agy only touches tests listed there). The user tests features manually:
   write a short `## Checklist test tay` (steps → expected result) after the last PLAN.

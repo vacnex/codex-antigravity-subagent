@@ -53,8 +53,10 @@ For each PLAN in `REVIEW`:
    - agy's report: "Needed but not created", deviations, notes.
 3. Decide:
    - **Good** → nothing to do for this PLAN.
-   - **Small issues** (a few lines in total) → fix them yourself with Edit. Cheaper than
-     another agy round plus another review.
+   - **Small issues** (a few lines in total) → fix them yourself with the Edit tool.
+     Cheaper than another agy round plus another review. Never rewrite source files
+     with python/sed/scripts: on Windows a text-mode write turns LF into CRLF and the
+     whole file shows up as changed.
    - **Larger issues** → write `.agy/runs/<run>/PLAN-XX.findings.md` as a list of
      `file` / `symbol` / problem / expected, then `agy-run fix PLAN-XX <findings file>`
      (background, same as `next`). At most 2 fix rounds per PLAN; after that fix it

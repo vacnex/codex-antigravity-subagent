@@ -125,6 +125,8 @@ check | import <file> | next | fix <PLAN> <findings.md> | undo <PLAN> | status |
   turn in the same conversation; still no report → needs attention), and `agy models`
   hanging (newest Flash cached per effort in `.agy/models.json` for 24 h; a stale cache
   is used when the lookup fails). Contracts are written all-or-nothing.
+- Validation runs every command even after one fails, so the single auto-fix round
+  gets all lint/typecheck/test errors at once (a TSDC run lost a round to lint-first).
 
 ## Execution (`agy-execute`) — option C: gate per dependency layer
 

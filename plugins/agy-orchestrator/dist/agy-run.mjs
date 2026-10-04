@@ -7958,20 +7958,18 @@ async function checkPlan(root, dir, run, plan, checkpoint, bp) {
   const diff = diffText(root, checkpoint, post);
   const diffFile = path6.join(dir, `${plan.id}.diff`);
   writeFileSync3(diffFile, diff);
-  let validate = { ok: true, skipped: true };
+  let validate = { ok: true, skipped: true, failures: [] };
   if (changed.length > 0 && bp.validate.length > 0) {
-    validate = { ok: true, skipped: false };
+    const failures = [];
     const log = [];
     for (const command2 of bp.validate) {
       const r = await runCommand(command2, root, VALIDATE_TIMEOUT_MS);
       log.push(`$ ${command2}
 ${r.stdout}${r.stderr}`);
-      if (r.code !== 0 || r.timedOut) {
-        validate = { ok: false, skipped: false, command: command2, output: tail(`${r.stdout}
-${r.stderr}`, 60) + (r.timedOut ? "\n(timed out)" : "") };
-        break;
-      }
+      if (r.code !== 0 || r.timedOut) failures.push({ command: command2, output: tail(`${r.stdout}
+${r.stderr}`, 60) + (r.timedOut ? "\n(timed out)" : "") });
     }
+    validate = { ok: failures.length === 0, skipped: false, failures };
     writeFileSync3(path6.join(dir, `${plan.id}.validate.txt`), log.join("\n"));
   }
   return { post, changed, outOfScope, dirScopedNew, validate, diffFile, diffLines: diff ? diff.split("\n").length : 0 };
@@ -7982,11 +7980,11 @@ function runnerFindings(check) {
     parts.push(`Files changed outside the allowed scope (revert these changes):
 ${check.outOfScope.map((c) => `- ${c.file}`).join("\n")}`);
   }
-  if (!check.validate.ok) {
-    parts.push(`Validation failed: \`${check.validate.command}\`
+  for (const f of check.validate.failures) {
+    parts.push(`Validation failed: \`${f.command}\`
 Last output lines:
 \`\`\`
-${check.validate.output}
+${f.output}
 \`\`\``);
   }
   return parts.length ? parts.join("\n\n") : void 0;
@@ -8050,8 +8048,8 @@ function formatPlan(state, r) {
   if (c?.changed.length) lines.push(`  changed: ${c.changed.map((x) => `${x.status} ${x.file}`).join(", ")}`);
   if (c?.outOfScope.length) lines.push(`  OUT OF SCOPE (agy or you): ${c.outOfScope.map((x) => x.file).join(", ")}`);
   if (c?.dirScopedNew.length) lines.push(`  new files under a folder scope (check placement): ${c.dirScopedNew.join(", ")}`);
-  if (c && !c.validate.ok) lines.push(`  validate failed: ${c.validate.command}
-${indent(tail(c.validate.output ?? "", 15), 4)}`);
+  for (const f of c?.validate.failures ?? []) lines.push(`  validate failed: ${f.command}
+${indent(tail(f.output, 15), 4)}`);
   if (r.turn?.deniedActions.length) lines.push(`  agy denied actions: ${r.turn.deniedActions.join(", ")}`);
   if (r.reportText) lines.push(`  agy report:
 ${indent(tail(r.reportText, 30), 4)}`);

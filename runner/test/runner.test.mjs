@@ -163,6 +163,25 @@ test('validation failure is sent back once, then left for review', () => {
   assert.equal(prompts(scen).length, 2);
 });
 
+test('every failing validate command goes into the same auto-fix round', () => {
+  const dir = makeRepo();
+  const scen = scenario(dir, [
+    { write: { 'src/greeter.js': 'x\n' }, response: DONE },
+    { write: { 'src/greeter.js': 'y\n' }, response: DONE },
+  ]);
+  const bp = BLUEPRINT('node -e "process.exit(3)"').replace(
+    '  - node -e "process.exit(3)"\n',
+    '  - node -e "process.exit(3)"\n  - node -e "console.log(\'second check broke\');process.exit(4)"\n',
+  );
+  importBlueprint(dir, scen, bp);
+  const r = run(dir, scen, 'next');
+  assert.equal(r.code, 0, r.out);
+  const fix = prompts(scen)[1].prompt;
+  assert.match(fix, /process\.exit\(3\)/);
+  assert.match(fix, /second check broke/);
+  assert.equal((r.out.match(/validate failed:/g) ?? []).length, 2);
+});
+
 test('blocked report stops the layer with exit code 2', () => {
   const dir = makeRepo();
   const scen = scenario(dir, [{ response: '## Recon\n...\n## Result: BLOCKED\n- Conflicts with the PLAN: no Result type exists' }]);

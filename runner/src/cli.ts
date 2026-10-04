@@ -43,7 +43,8 @@ type Check = {
   changed: Change[];
   outOfScope: Change[];
   dirScopedNew: string[];
-  validate: { ok: boolean; skipped: boolean; command?: string; output?: string };
+  // Every validate command runs even after one fails, so one auto-fix round sees all errors.
+  validate: { ok: boolean; skipped: boolean; failures: { command: string; output: string }[] };
   diffFile: string;
   diffLines: number;
 };
@@ -59,18 +60,16 @@ async function checkPlan(root: string, dir: string, run: string, plan: Plan, che
   const diffFile = path.join(dir, `${plan.id}.diff`);
   writeFileSync(diffFile, diff);
 
-  let validate: Check['validate'] = { ok: true, skipped: true };
+  let validate: Check['validate'] = { ok: true, skipped: true, failures: [] };
   if (changed.length > 0 && bp.validate.length > 0) {
-    validate = { ok: true, skipped: false };
+    const failures: Check['validate']['failures'] = [];
     const log: string[] = [];
     for (const command of bp.validate) {
       const r = await runCommand(command, root, VALIDATE_TIMEOUT_MS);
       log.push(`$ ${command}\n${r.stdout}${r.stderr}`);
-      if (r.code !== 0 || r.timedOut) {
-        validate = { ok: false, skipped: false, command, output: tail(`${r.stdout}\n${r.stderr}`, 60) + (r.timedOut ? '\n(timed out)' : '') };
-        break;
-      }
+      if (r.code !== 0 || r.timedOut) failures.push({ command, output: tail(`${r.stdout}\n${r.stderr}`, 60) + (r.timedOut ? '\n(timed out)' : '') });
     }
+    validate = { ok: failures.length === 0, skipped: false, failures };
     writeFileSync(path.join(dir, `${plan.id}.validate.txt`), log.join('\n'));
   }
   return { post, changed, outOfScope, dirScopedNew, validate, diffFile, diffLines: diff ? diff.split('\n').length : 0 };
@@ -81,8 +80,8 @@ function runnerFindings(check: Check): string | undefined {
   if (check.outOfScope.length) {
     parts.push(`Files changed outside the allowed scope (revert these changes):\n${check.outOfScope.map((c) => `- ${c.file}`).join('\n')}`);
   }
-  if (!check.validate.ok) {
-    parts.push(`Validation failed: \`${check.validate.command}\`\nLast output lines:\n\`\`\`\n${check.validate.output}\n\`\`\``);
+  for (const f of check.validate.failures) {
+    parts.push(`Validation failed: \`${f.command}\`\nLast output lines:\n\`\`\`\n${f.output}\n\`\`\``);
   }
   return parts.length ? parts.join('\n\n') : undefined;
 }
@@ -156,7 +155,7 @@ function formatPlan(state: RunState, r: PlanRun): string {
   if (c?.changed.length) lines.push(`  changed: ${c.changed.map((x) => `${x.status} ${x.file}`).join(', ')}`);
   if (c?.outOfScope.length) lines.push(`  OUT OF SCOPE (agy or you): ${c.outOfScope.map((x) => x.file).join(', ')}`);
   if (c?.dirScopedNew.length) lines.push(`  new files under a folder scope (check placement): ${c.dirScopedNew.join(', ')}`);
-  if (c && !c.validate.ok) lines.push(`  validate failed: ${c.validate.command}\n${indent(tail(c.validate.output ?? '', 15), 4)}`);
+  for (const f of c?.validate.failures ?? []) lines.push(`  validate failed: ${f.command}\n${indent(tail(f.output, 15), 4)}`);
   if (r.turn?.deniedActions.length) lines.push(`  agy denied actions: ${r.turn.deniedActions.join(', ')}`);
   if (r.reportText) lines.push(`  agy report:\n${indent(tail(r.reportText, 30), 4)}`);
   if (c) lines.push(`  diff: ${rel(state.root, c.diffFile)} (${c.diffLines} lines)`);
