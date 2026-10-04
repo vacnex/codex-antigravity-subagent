@@ -1,5 +1,6 @@
 import { spawn, spawnSync } from 'node:child_process';
-import { appendFileSync, existsSync, readdirSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
 
@@ -62,6 +63,32 @@ export function msixShadowCopies(): string[] {
     if (existsSync(p)) hits.push(p);
   }
   return hits;
+}
+
+/** Global agy CLI settings; project-level settings files do not grant command permissions. */
+function agySettingsPath(): string {
+  return process.env.AGY_SETTINGS_PATH ?? path.join(os.homedir(), '.gemini', 'antigravity-cli', 'settings.json');
+}
+
+/**
+ * Headless agy denies every shell command without a `command(<prefix>)` allow rule.
+ * Add one per validate command. Matching is exact for script runners (pnpm/npm/yarn:
+ * extra arguments or `*` are denied), so agy runs the commands as written. Rules are
+ * kept afterwards on purpose: the user's interactive agy benefits too.
+ * Returns the rules that were newly added.
+ */
+export function allowValidateCommands(commands: string[]): string[] {
+  if (commands.length === 0) return [];
+  const file = agySettingsPath();
+  let settings: Record<string, any> = {};
+  if (existsSync(file)) settings = JSON.parse(readFileSync(file, 'utf8').replace(/^﻿/, ''));
+  const allow: string[] = (settings.permissions ??= {}).allow ??= [];
+  const added = commands.map((c) => `command(${c.trim()})`).filter((rule) => !allow.includes(rule));
+  if (added.length === 0) return [];
+  allow.push(...added);
+  mkdirSync(path.dirname(file), { recursive: true });
+  writeFileSync(file, `${JSON.stringify(settings, null, 2)}\n`);
+  return added;
 }
 
 /** agy may be a script (tests use a fake agy written in JS); run those through node. */

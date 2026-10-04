@@ -28,7 +28,10 @@ export function planPrompt(bp: Blueprint, plan: Plan): string {
     plan.contracts.length ? `Contract files already written for you (do not change signatures):\n${list(plan.contracts.map((c) => c.file))}` : '',
     '## Validation',
     bp.validate.length
-      ? `You cannot run shell commands. After you finish, the runner runs:\n${list(bp.validate)}\nand sends you any errors.`
+      ? [
+          `You may run only these commands, from the repository root, exactly as written (no extra arguments, no other forms):\n${list(bp.validate)}`,
+          'Any other shell command is denied. Run them to check your work before the final report and fix what fails; they can be slow, so run them once you think the PLAN is complete, not after every edit. After you finish, the runner runs them again and sends you any errors.',
+        ].join('\n')
       : 'You cannot run shell commands. There is no validate command for this blueprint.',
     '## The PLAN',
     plan.body,
@@ -41,7 +44,7 @@ export function fixPrompt(plan: Plan, findings: string, source: 'runner' | 'revi
   const who = source === 'runner' ? 'The runner checked your work and found problems' : 'The reviewer found problems in your work';
   return [
     `# Fix request for ${plan.id}`,
-    `${who}. Fix exactly these, keep everything else as is, stay inside the same scope, and do not run shell commands.`,
+    `${who}. Fix exactly these, keep everything else as is, stay inside the same scope, and run no shell commands other than the validate commands allowed before.`,
     findings.trim(),
     'When done, output the same "## Result: DONE | BLOCKED" final report as before.',
   ].join('\n\n');

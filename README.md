@@ -4,7 +4,7 @@ Claude plans and reviews; the Antigravity CLI (`agy`, newest Gemini Flash) imple
 The goal is to save Claude quota: Claude spends it on decisions and review, agy on typing
 code.
 
-> Status: early (0.1.3). Design and decisions: [docs/design.md](docs/design.md).
+> Status: early (0.1.4). Design and decisions: [docs/design.md](docs/design.md).
 
 ## How it works
 
@@ -21,7 +21,9 @@ code.
 - agy works **in place** on your current branch and sees your uncommitted changes.
 - Before each PLAN the runner records a checkpoint (git objects only; your index, stash
   and branches are untouched), so a PLAN can be rolled back with `agy-run undo`.
-- agy never runs shell commands; the runner runs the blueprint's `validate` commands.
+- agy may run only the blueprint's `validate` commands, exactly as written (`agy-run import` adds
+  allow rules for them to `~/.gemini/antigravity-cli/settings.json` and keeps them); the runner
+  runs them again after each PLAN.
 - State lives in `.agy/` inside your repo (kept out of git via `.git/info/exclude`).
 
 ## Requirements

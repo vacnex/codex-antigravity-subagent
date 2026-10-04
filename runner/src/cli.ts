@@ -1,7 +1,7 @@
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
-import { agyVersion, findAgy, msixShadowCopies, newestFlash, runTurn, type TurnResult } from './agy.js';
+import { agyVersion, allowValidateCommands, findAgy, msixShadowCopies, newestFlash, runTurn, type TurnResult } from './agy.js';
 import { BlueprintError, inScope, layers, parseBlueprint, type Blueprint, type Plan } from './blueprint.js';
 import { changes, deleteRefs, diffText, ensureExcluded, repoRoot, restoreFiles, setRef, snapshot, type Change } from './git.js';
 import { failureExcerpt, runCommand, tail } from './proc.js';
@@ -289,6 +289,7 @@ function cmdImport(cwd: string, file: string): Outcome {
   const agy = findAgyOrThrow();
   ensureExcluded(root);
   const model = resolveModel(root, agy, bp.effort ?? 'high');
+  const allowed = allowValidateCommands(bp.validate);
   const run = newRunId(bp.title);
   const dir = runDir(root, run);
   mkdirSync(dir, { recursive: true });
@@ -307,7 +308,17 @@ function cmdImport(cwd: string, file: string): Outcome {
     .join('\n');
   return {
     code: 0,
-    text: `RUN ${run}\ntitle: ${bp.title}\nmodel: ${model}\nvalidate: ${bp.validate.join(' ; ') || '(none)'}\n${lay}\nNEXT: agy-run next   (latest run; or --run ${run})`,
+    text: [
+      `RUN ${run}`,
+      `title: ${bp.title}`,
+      `model: ${model}`,
+      `validate: ${bp.validate.join(' ; ') || '(none)'}`,
+      allowed.length ? `agy allowed to run (added to agy settings): ${allowed.join(', ')}` : '',
+      lay,
+      `NEXT: agy-run next   (latest run; or --run ${run})`,
+    ]
+      .filter(Boolean)
+      .join('\n'),
   };
 }
 

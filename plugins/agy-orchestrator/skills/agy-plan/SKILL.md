@@ -100,18 +100,20 @@ better done yourself.
 ## Validation and testing
 
 - `validate` = the project's existing build/typecheck/lint/test commands, one executable
-  per line, runnable from the repo root, no `&&`, pipes or redirects. The runner runs
-  all of them after each PLAN and sends every failure back to agy in one auto-fix
-  round; agy cannot run commands.
+  per line, runnable from the repo root, no `&&`, pipes or redirects. agy may run
+  exactly these commands to check its own work (the runner allows them in agy's
+  settings on import), and the runner runs all of them after each PLAN and sends every
+  failure back in an auto-fix round. Keep them reasonably fast: agy runs them too.
 - Make lint fail on warnings (eslint: append `--max-warnings 0`, e.g.
   `pnpm --dir web lint --max-warnings 0`) when the project keeps lint warning-free.
   Otherwise warnings pass validation and you end up fixing them yourself.
 - **The user tests by hand.** Always write a `## Checklist test tay` after the last
   PLAN (steps → expected result) that covers the feature's edge cases, so it can stand
   in for automated tests.
-- Do NOT plan new automated tests by default. agy cannot run tests, so tests that need
-  trial and error land on Claude at the most expensive point of the run (a run lost
-  ~1.6M tokens to a router mock in a Nuxt test).
+- Do NOT plan new automated tests by default. Tests that need trial and error (mocks,
+  timing, framework runtime) are where agy gets stuck, and what it cannot fix lands on
+  Claude at the most expensive point of the run (a run lost ~1.6M tokens to a router
+  mock in a Nuxt test).
 - If the user asks for tests, plan them only for pure logic (domain/util functions,
   parsers, stores without framework runtime) and only when a test of the same kind
   already exists to imitate (name it in `### Làm theo mẫu`). Leave UI, routing,

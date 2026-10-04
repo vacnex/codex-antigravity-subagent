@@ -7362,12 +7362,13 @@ var require_dist = __commonJS({
 });
 
 // src/cli.ts
-import { copyFileSync as copyFileSync2, existsSync as existsSync6, mkdirSync as mkdirSync3, readFileSync as readFileSync4, writeFileSync as writeFileSync3 } from "node:fs";
+import { copyFileSync as copyFileSync2, existsSync as existsSync6, mkdirSync as mkdirSync4, readFileSync as readFileSync5, writeFileSync as writeFileSync4 } from "node:fs";
 import path6 from "node:path";
 
 // src/agy.ts
 import { spawn as spawn2, spawnSync as spawnSync2 } from "node:child_process";
-import { appendFileSync, existsSync as existsSync2, readdirSync } from "node:fs";
+import { appendFileSync, existsSync as existsSync2, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import os from "node:os";
 import path2 from "node:path";
 import { createInterface } from "node:readline";
 
@@ -7517,6 +7518,23 @@ function msixShadowCopies() {
     if (existsSync2(p)) hits.push(p);
   }
   return hits;
+}
+function agySettingsPath() {
+  return process.env.AGY_SETTINGS_PATH ?? path2.join(os.homedir(), ".gemini", "antigravity-cli", "settings.json");
+}
+function allowValidateCommands(commands) {
+  if (commands.length === 0) return [];
+  const file = agySettingsPath();
+  let settings = {};
+  if (existsSync2(file)) settings = JSON.parse(readFileSync(file, "utf8").replace(/^﻿/, ""));
+  const allow = (settings.permissions ??= {}).allow ??= [];
+  const added = commands.map((c) => `command(${c.trim()})`).filter((rule) => !allow.includes(rule));
+  if (added.length === 0) return [];
+  allow.push(...added);
+  mkdirSync(path2.dirname(file), { recursive: true });
+  writeFileSync(file, `${JSON.stringify(settings, null, 2)}
+`);
+  return added;
 }
 function command(agy, args) {
   return /\.(c?m?js)$/i.test(agy) ? [process.execPath, [agy, ...args]] : [agy, args];
@@ -7753,7 +7771,7 @@ function inScope(file, scope) {
 
 // src/git.ts
 import { execFileSync } from "node:child_process";
-import { copyFileSync, existsSync as existsSync3, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync as existsSync3, mkdirSync as mkdirSync2, readFileSync as readFileSync2, rmSync, unlinkSync, writeFileSync as writeFileSync2 } from "node:fs";
 import path3 from "node:path";
 function git(cwd, args, env, input) {
   return execFileSync("git", args, {
@@ -7777,7 +7795,7 @@ function headCommit(root) {
   }
 }
 function snapshot(root, scratchDir, message) {
-  mkdirSync(scratchDir, { recursive: true });
+  mkdirSync2(scratchDir, { recursive: true });
   const indexFile = path3.join(scratchDir, `snapshot-${process.pid}.index`);
   const env = { GIT_INDEX_FILE: indexFile };
   try {
@@ -7829,28 +7847,28 @@ function restoreFiles(root, commit, list2) {
       continue;
     }
     const blob = execFileSync("git", ["show", `${commit}:${c.file}`], { cwd: root, maxBuffer: 256 * 1024 * 1024, windowsHide: true });
-    mkdirSync(path3.dirname(abs), { recursive: true });
-    writeFileSync(abs, blob);
+    mkdirSync2(path3.dirname(abs), { recursive: true });
+    writeFileSync2(abs, blob);
   }
 }
 function ensureExcluded(root, entry = ".agy/") {
   const gitDir = path3.resolve(root, git(root, ["rev-parse", "--git-common-dir"]).trim());
   const file = path3.join(gitDir, "info", "exclude");
-  const current = existsSync3(file) ? readFileSync(file, "utf8") : "";
+  const current = existsSync3(file) ? readFileSync2(file, "utf8") : "";
   if (current.split(/\r?\n/).some((l) => l.trim() === entry)) return;
-  mkdirSync(path3.dirname(file), { recursive: true });
-  writeFileSync(file, `${current}${current && !current.endsWith("\n") ? "\n" : ""}${entry}
+  mkdirSync2(path3.dirname(file), { recursive: true });
+  writeFileSync2(file, `${current}${current && !current.endsWith("\n") ? "\n" : ""}${entry}
 `);
 }
 
 // src/prompt.ts
-import { existsSync as existsSync4, readFileSync as readFileSync2 } from "node:fs";
+import { existsSync as existsSync4, readFileSync as readFileSync3 } from "node:fs";
 import path4 from "node:path";
 import { fileURLToPath } from "node:url";
 function workerBrief() {
   const here = path4.dirname(fileURLToPath(import.meta.url));
   for (const p of [path4.join(here, "..", "templates", "worker-brief.md"), path4.join(here, "..", "..", "plugins", "agy-orchestrator", "templates", "worker-brief.md")]) {
-    if (existsSync4(p)) return readFileSync2(p, "utf8").replace(/^# .*\n+/, "");
+    if (existsSync4(p)) return readFileSync3(p, "utf8").replace(/^# .*\n+/, "");
   }
   throw new Error("worker-brief.md not found next to the runner");
 }
@@ -7871,9 +7889,11 @@ ${list(plan.readOnly)}`,
     plan.contracts.length ? `Contract files already written for you (do not change signatures):
 ${list(plan.contracts.map((c) => c.file))}` : "",
     "## Validation",
-    bp.validate.length ? `You cannot run shell commands. After you finish, the runner runs:
-${list(bp.validate)}
-and sends you any errors.` : "You cannot run shell commands. There is no validate command for this blueprint.",
+    bp.validate.length ? [
+      `You may run only these commands, from the repository root, exactly as written (no extra arguments, no other forms):
+${list(bp.validate)}`,
+      "Any other shell command is denied. Run them to check your work before the final report and fix what fails; they can be slow, so run them once you think the PLAN is complete, not after every edit. After you finish, the runner runs them again and sends you any errors."
+    ].join("\n") : "You cannot run shell commands. There is no validate command for this blueprint.",
     "## The PLAN",
     plan.body
   ].filter(Boolean).join("\n\n");
@@ -7882,7 +7902,7 @@ function fixPrompt(plan, findings, source) {
   const who = source === "runner" ? "The runner checked your work and found problems" : "The reviewer found problems in your work";
   return [
     `# Fix request for ${plan.id}`,
-    `${who}. Fix exactly these, keep everything else as is, stay inside the same scope, and do not run shell commands.`,
+    `${who}. Fix exactly these, keep everything else as is, stay inside the same scope, and run no shell commands other than the validate commands allowed before.`,
     findings.trim(),
     'When done, output the same "## Result: DONE | BLOCKED" final report as before.'
   ].join("\n\n");
@@ -7902,7 +7922,7 @@ function parseReport(response) {
 }
 
 // src/state.ts
-import { existsSync as existsSync5, mkdirSync as mkdirSync2, readdirSync as readdirSync2, readFileSync as readFileSync3, renameSync, rmSync as rmSync2, writeFileSync as writeFileSync2 } from "node:fs";
+import { existsSync as existsSync5, mkdirSync as mkdirSync3, readdirSync as readdirSync2, readFileSync as readFileSync4, renameSync, rmSync as rmSync2, writeFileSync as writeFileSync3 } from "node:fs";
 import path5 from "node:path";
 var AGY_DIR = ".agy";
 function runsDir(root) {
@@ -7919,13 +7939,13 @@ function latestRun(root) {
 function loadState(root, run) {
   const file = path5.join(runDir(root, run), "state.json");
   if (!existsSync5(file)) throw new Error(`run not found: ${run}`);
-  return JSON.parse(readFileSync3(file, "utf8"));
+  return JSON.parse(readFileSync4(file, "utf8"));
 }
 function saveState(state) {
   const dir = runDir(state.root, state.run);
-  mkdirSync2(dir, { recursive: true });
+  mkdirSync3(dir, { recursive: true });
   const tmp = path5.join(dir, "state.json.tmp");
-  writeFileSync2(tmp, `${JSON.stringify(state, null, 2)}
+  writeFileSync3(tmp, `${JSON.stringify(state, null, 2)}
 `);
   renameSync(tmp, path5.join(dir, "state.json"));
 }
@@ -7936,7 +7956,7 @@ function setPlan(state, id, patch) {
 function acquireLock(root, run) {
   const file = path5.join(runDir(root, run), "lock");
   if (existsSync5(file)) {
-    const pid = Number(readFileSync3(file, "utf8"));
+    const pid = Number(readFileSync4(file, "utf8"));
     let alive = false;
     try {
       process.kill(pid, 0);
@@ -7946,7 +7966,7 @@ function acquireLock(root, run) {
     }
     if (alive && pid !== process.pid) throw new Error(`run ${run} is already being processed by pid ${pid}`);
   }
-  writeFileSync2(file, String(process.pid));
+  writeFileSync3(file, String(process.pid));
   return () => rmSync2(file, { force: true });
 }
 function slugify(text) {
@@ -7972,7 +7992,7 @@ function loadRun(cwd, runArg) {
   if (!run) throw new UsageError("no run found; create one with `agy-run import <blueprint.md>`");
   const state = loadState(root, run);
   const dir = runDir(root, run);
-  const bp = parseBlueprint(readFileSync4(path6.join(dir, "blueprint.md"), "utf8"));
+  const bp = parseBlueprint(readFileSync5(path6.join(dir, "blueprint.md"), "utf8"));
   return { root, state, bp, dir };
 }
 function planById(bp, id) {
@@ -7989,7 +8009,7 @@ async function checkPlan(root, dir, run, plan, checkpoint, bp) {
   const dirScopedNew = changed.filter((c) => c.status === "A" && inScope(c.file, plan.write) && !exact.has(c.file)).map((c) => c.file);
   const diff = diffText(root, checkpoint, post);
   const diffFile = path6.join(dir, `${plan.id}.diff`);
-  writeFileSync3(diffFile, diff);
+  writeFileSync4(diffFile, diff);
   let validate = { ok: true, skipped: true, failures: [] };
   if (changed.length > 0 && bp.validate.length > 0) {
     const failures = [];
@@ -8002,7 +8022,7 @@ ${r.stdout}${r.stderr}`);
 ${r.stderr}`) + (r.timedOut ? "\n(timed out)" : "") });
     }
     validate = { ok: failures.length === 0, skipped: false, failures };
-    writeFileSync3(path6.join(dir, `${plan.id}.validate.txt`), log.join("\n"));
+    writeFileSync4(path6.join(dir, `${plan.id}.validate.txt`), log.join("\n"));
   }
   return { post, changed, outOfScope, dirScopedNew, validate, diffFile, diffLines: diff ? diff.split("\n").length : 0 };
 }
@@ -8026,15 +8046,15 @@ function writeContracts(root, plan) {
   for (const c of plan.contracts) {
     const abs = path6.join(root, c.file);
     if (existsSync6(abs)) {
-      const current = readFileSync4(abs, "utf8").replace(/\r\n/g, "\n");
+      const current = readFileSync5(abs, "utf8").replace(/\r\n/g, "\n");
       if (current === c.content) continue;
       return `contract file ${c.file} already exists with different content; contracts are only for new files; nothing was written \u2014 move its signatures into the PLAN text, then \`agy-run undo ${plan.id}\` and \`agy-run next\``;
     }
     pending.push({ abs, content: c.content });
   }
   for (const { abs, content } of pending) {
-    mkdirSync3(path6.dirname(abs), { recursive: true });
-    writeFileSync3(abs, content);
+    mkdirSync4(path6.dirname(abs), { recursive: true });
+    writeFileSync4(abs, content);
   }
   return void 0;
 }
@@ -8043,7 +8063,7 @@ function resolveModel(root, agy, effort) {
   const file = path6.join(root, AGY_DIR, "models.json");
   let cache = {};
   try {
-    cache = JSON.parse(readFileSync4(file, "utf8"));
+    cache = JSON.parse(readFileSync5(file, "utf8"));
   } catch {
   }
   const hit = cache[effort];
@@ -8055,8 +8075,8 @@ function resolveModel(root, agy, effort) {
     throw new Error(flash.error);
   }
   cache[effort] = { model: flash.model, at: Date.now() };
-  mkdirSync3(path6.dirname(file), { recursive: true });
-  writeFileSync3(file, `${JSON.stringify(cache, null, 2)}
+  mkdirSync4(path6.dirname(file), { recursive: true });
+  writeFileSync4(file, `${JSON.stringify(cache, null, 2)}
 `);
   return flash.model;
 }
@@ -8127,7 +8147,7 @@ async function finishTurn(root, dir, state, bp, plan, firstTurn, checkpoint, all
       return { plan, turn, check: check2, note: note2 };
     }
     const report = parseReport(turn.response);
-    writeFileSync3(path6.join(dir, `${plan.id}.report.md`), report.text);
+    writeFileSync4(path6.join(dir, `${plan.id}.report.md`), report.text);
     if (report.result === "UNKNOWN" && !continued && turn.conversationId) {
       continued = true;
       turn = await resume(continuePrompt(plan));
@@ -8184,13 +8204,14 @@ function cmdCheck(cwd) {
 function cmdImport(cwd, file) {
   const root = repoRoot(cwd);
   const source = path6.resolve(cwd, file);
-  const bp = parseBlueprint(readFileSync4(source, "utf8"));
+  const bp = parseBlueprint(readFileSync5(source, "utf8"));
   const agy = findAgyOrThrow();
   ensureExcluded(root);
   const model = resolveModel(root, agy, bp.effort ?? "high");
+  const allowed = allowValidateCommands(bp.validate);
   const run = newRunId(bp.title);
   const dir = runDir(root, run);
-  mkdirSync3(dir, { recursive: true });
+  mkdirSync4(dir, { recursive: true });
   copyFileSync2(source, path6.join(dir, "blueprint.md"));
   const state = {
     version: 1,
@@ -8204,12 +8225,15 @@ function cmdImport(cwd, file) {
   const lay = layers(bp.plans).map((ids, i) => `  layer ${i + 1}: ${ids.map((id) => `${id}${planById(bp, id).executor === "claude" ? "(claude)" : ""}`).join(", ")}`).join("\n");
   return {
     code: 0,
-    text: `RUN ${run}
-title: ${bp.title}
-model: ${model}
-validate: ${bp.validate.join(" ; ") || "(none)"}
-${lay}
-NEXT: agy-run next   (latest run; or --run ${run})`
+    text: [
+      `RUN ${run}`,
+      `title: ${bp.title}`,
+      `model: ${model}`,
+      `validate: ${bp.validate.join(" ; ") || "(none)"}`,
+      allowed.length ? `agy allowed to run (added to agy settings): ${allowed.join(", ")}` : "",
+      lay,
+      `NEXT: agy-run next   (latest run; or --run ${run})`
+    ].filter(Boolean).join("\n")
   };
 }
 async function cmdNext(cwd, runArg) {
@@ -8274,7 +8298,7 @@ async function cmdFix(cwd, planId, findingsFile, runArg) {
   const ps = state.plans[plan.id];
   if (!ps.conversationId || !ps.checkpoint) throw new UsageError(`${plan.id} has no agy conversation to continue (status ${ps.status})`);
   if (!["review", "blocked", "failed"].includes(ps.status)) throw new UsageError(`${plan.id} is ${ps.status}; fix applies to review/blocked/failed plans`);
-  const findings = readFileSync4(path6.resolve(cwd, findingsFile), "utf8");
+  const findings = readFileSync5(path6.resolve(cwd, findingsFile), "utf8");
   const release = acquireLock(root, state.run);
   try {
     setPlan(state, plan.id, { fixes: ps.fixes + 1, turns: ps.turns + 1 });

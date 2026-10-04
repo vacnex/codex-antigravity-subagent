@@ -34,11 +34,18 @@ function scenario(dir, turns) {
   return file;
 }
 
+/** Per-test agy settings file, so tests never touch the real ~/.gemini settings. */
+function settingsFor(dir) {
+  const file = path.join(dir, '..', `${path.basename(dir)}.agy-settings.json`);
+  if (!existsSync(file)) writeFileSync(file, '{"colorScheme":"dark"}');
+  return file;
+}
+
 function run(dir, scenarioFile, ...args) {
   const r = spawnSync(process.execPath, [RUNNER, ...args], {
     cwd: dir,
     encoding: 'utf8',
-    env: { ...process.env, AGY_PATH: FAKE_AGY, FAKE_AGY_SCENARIO: scenarioFile },
+    env: { ...process.env, AGY_PATH: FAKE_AGY, FAKE_AGY_SCENARIO: scenarioFile, AGY_SETTINGS_PATH: settingsFor(dir) },
   });
   return { code: r.status, out: r.stdout + r.stderr };
 }
@@ -115,7 +122,11 @@ test('happy path: import, next, review, next, done', () => {
   const p = prompts(scen);
   assert.equal(p.length, 1);
   assert.match(p[0].prompt, /## PLAN-01: Add greeter/);
-  assert.match(p[0].prompt, /You cannot run shell commands/);
+  assert.match(p[0].prompt, /You may run only these commands[\s\S]*- node --version/);
+  // the validate command was allowed in the (test) agy settings, keeping existing keys
+  const settings = JSON.parse(readFileSync(settingsFor(dir), 'utf8'));
+  assert.deepEqual(settings.permissions.allow, ['command(node --version)']);
+  assert.equal(settings.colorScheme, 'dark');
   assert.ok(p[0].args.includes('accept-edits'));
 
   r = run(dir, scen, 'next');
@@ -317,7 +328,7 @@ test('model is cached per effort and reused when agy models fails', () => {
   const r = spawnSync(process.execPath, [RUNNER, 'import', bpFile], {
     cwd: dir,
     encoding: 'utf8',
-    env: { ...process.env, AGY_PATH: FAKE_AGY, FAKE_AGY_SCENARIO: scen, FAKE_AGY_MODELS_FAIL: '1' },
+    env: { ...process.env, AGY_PATH: FAKE_AGY, FAKE_AGY_SCENARIO: scen, AGY_SETTINGS_PATH: settingsFor(dir), FAKE_AGY_MODELS_FAIL: '1' },
   });
   assert.equal(r.status, 0, r.stdout + r.stderr);
   assert.match(r.stdout, /model: gemini-3\.8-flash-high/);

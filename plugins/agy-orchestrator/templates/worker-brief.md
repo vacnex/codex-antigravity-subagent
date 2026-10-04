@@ -35,8 +35,9 @@ If "Conflicts with the PLAN" is not none, stop and report BLOCKED. Do not improv
   modules: read only.
 - Do not add packages, do not refactor unrelated code. Create or change test files only
   when they are in your `write` paths.
-- Do not run shell commands (they are denied). The runner builds after you finish and
-  sends you the errors if any.
+- Shell commands: only the validate commands listed under "Validation" below (all
+  others are denied; do not try to work around a denial). The runner runs them again
+  after you finish and sends you the errors if any.
 
 ## Step 3 — Self-check, then final report
 

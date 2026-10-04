@@ -130,21 +130,28 @@ check | import <file> | next | fix <PLAN> <findings.md> | undo <PLAN> | status |
   the output tail, which in a TSDC run was 200 lines of Vue warning dumps. A second
   auto-fix round runs only when the first one changed the errors.
 - Manual testing by the user is the default; automated tests only for pure logic with
-  an existing precedent. agy cannot run tests, so test trial-and-error lands on Claude:
+  an existing precedent. Before agy could run validate, test trial-and-error landed on Claude:
   TSDC task B (+552 lines, URL sync) cost Claude 84 calls / ~1.8M token-equivalents,
   ~85% of it debugging a router mock in Nuxt tests.
 
-## Open experiment: letting agy run the validate commands
+## agy runs the validate commands itself
 
 Headless agy auto-denies every shell command unless `permissions.allow` holds a
-`command(<prefix>)` rule. Tested 2026-10-04 (agy 1.2.16): the rule works in the CLI
-settings `~/.gemini/antigravity-cli/settings.json` and matches by prefix
-(`command(node -e)` allowed `node -e "console.log(42)"`); the same rule in a project
-`.agents/settings.json` or `.gemini/settings.json` had no effect. Commands run in
-PowerShell with the user's profile. Letting agy run exactly the blueprint's validate
-commands (prefix → it can also run one test file) would move test/build trial-and-error
-to Gemini quota. Cost: the runner must add and remove rules in a global file, or the
-user adds them once per project.
+`command(...)` rule. Tested 2026-10-04 (agy 1.2.16):
+- the rule works only in the CLI settings `~/.gemini/antigravity-cli/settings.json`;
+  the same rule in a project `.agents/settings.json` or `.gemini/settings.json` has no
+  effect;
+- matching is by prefix for plain programs (`command(node -e)` allowed
+  `node -e "console.log(42)"`) but exact for script runners: `command(pnpm --dir X test)`
+  allows that command only, not `... test one.test.ts`, and `*` is not a wildcard;
+- commands run in PowerShell with the user's profile.
+
+So `agy-run import` adds `command(<validate command>)` for each validate command to
+that file and leaves the rules there (the user's own agy sessions stop asking too). The
+prompt lets agy run exactly those commands before its final report, which moves
+build/lint/test trial-and-error to Gemini quota. `--dangerously-skip-permissions` was
+rejected: agy could then run git, installs or deletes that break checkpoints and the
+scope check.
 
 ## Execution (`agy-execute`) — option C: gate per dependency layer
 
