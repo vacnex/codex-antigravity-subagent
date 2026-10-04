@@ -3,6 +3,7 @@ import path from 'node:path';
 
 import { agyVersion, allowValidateCommands, findAgy, msixShadowCopies, newestFlash, runTurn, type TurnResult } from './agy.js';
 import { BlueprintError, inScope, layers, parseBlueprint, type Blueprint, type Plan } from './blueprint.js';
+import { restoreFileFormats } from './encoding.js';
 import { changes, deleteRefs, diffText, ensureExcluded, repoRoot, restoreFiles, setRef, snapshot, type Change } from './git.js';
 import { failureExcerpt, runCommand, tail } from './proc.js';
 import { continuePrompt, fixPrompt, parseReport, planPrompt } from './prompt.js';
@@ -43,6 +44,7 @@ type Check = {
   changed: Change[];
   outOfScope: Change[];
   dirScopedNew: string[];
+  formatsRestored: string[];
   // Every validate command runs even after one fails, so one auto-fix round sees all errors.
   validate: { ok: boolean; skipped: boolean; failures: { command: string; output: string }[] };
   diffFile: string;
@@ -50,9 +52,16 @@ type Check = {
 };
 
 async function checkPlan(root: string, dir: string, run: string, plan: Plan, checkpoint: string, bp: Blueprint): Promise<Check> {
-  const post = snapshot(root, dir, `agy-run ${run} ${plan.id} after`);
-  const changed = changes(root, checkpoint, post);
   const allowed = [...plan.write, ...plan.wiring];
+  let post = snapshot(root, dir, `agy-run ${run} ${plan.id} after`);
+  let changed = changes(root, checkpoint, post);
+  // agy's file tools drop BOMs and rewrite line endings; put each file's own format back
+  // (only in-scope files: out-of-scope changes may be the user's).
+  const formatsRestored = restoreFileFormats(root, checkpoint, post, changed.filter((c) => inScope(c.file, allowed)));
+  if (formatsRestored.length) {
+    post = snapshot(root, dir, `agy-run ${run} ${plan.id} after (formats restored)`);
+    changed = changes(root, checkpoint, post);
+  }
   const outOfScope = changed.filter((c) => !inScope(c.file, allowed));
   const exact = new Set(plan.write.filter((w) => !w.endsWith('/')));
   const dirScopedNew = changed.filter((c) => c.status === 'A' && inScope(c.file, plan.write) && !exact.has(c.file)).map((c) => c.file);
@@ -72,7 +81,7 @@ async function checkPlan(root: string, dir: string, run: string, plan: Plan, che
     validate = { ok: failures.length === 0, skipped: false, failures };
     writeFileSync(path.join(dir, `${plan.id}.validate.txt`), log.join('\n'));
   }
-  return { post, changed, outOfScope, dirScopedNew, validate, diffFile, diffLines: diff ? diff.split('\n').length : 0 };
+  return { post, changed, outOfScope, dirScopedNew, formatsRestored, validate, diffFile, diffLines: diff ? diff.split('\n').length : 0 };
 }
 
 function runnerFindings(check: Check): string | undefined {
@@ -154,6 +163,7 @@ function formatPlan(state: RunState, r: PlanRun): string {
   if (r.note) lines.push(`  note: ${r.note}`);
   if (c?.changed.length) lines.push(`  changed: ${c.changed.map((x) => `${x.status} ${x.file}`).join(', ')}`);
   if (c?.outOfScope.length) lines.push(`  OUT OF SCOPE (agy or you): ${c.outOfScope.map((x) => x.file).join(', ')}`);
+  if (c?.formatsRestored.length) lines.push(`  file format restored by runner: ${c.formatsRestored.join(', ')}`);
   if (c?.dirScopedNew.length) lines.push(`  new files under a folder scope (check placement): ${c.dirScopedNew.join(', ')}`);
   for (const f of c?.validate.failures ?? []) lines.push(`  validate failed: ${f.command}\n${indent(tail(f.output, 15), 4)}`);
   if (r.turn?.deniedActions.length) lines.push(`  agy denied actions: ${r.turn.deniedActions.join(', ')}`);

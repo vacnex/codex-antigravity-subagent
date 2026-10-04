@@ -226,6 +226,26 @@ test('the fix prompt carries the failure lines, not the noisy tail; changed erro
   assert.match(p[2].prompt, /to be 'v2'/);
 });
 
+test('a modified file gets its own BOM and line endings back; the diff shows only real changes', () => {
+  const dir = makeRepo();
+  writeFileSync(path.join(dir, 'src', 'app.js'), '﻿export const app = 1;\r\nexport const keep = 0;\r\n');
+  git(dir, 'add', '-A');
+  git(dir, 'commit', '-qm', 'bom + crlf');
+  const scen = scenario(dir, [
+    // agy rewrites the wiring file without BOM and with LF
+    { write: { 'src/greeter.js': 'x\n', 'src/app.js': 'export const app = 2;\nexport const keep = 0;\n' }, response: DONE },
+  ]);
+  importBlueprint(dir, scen);
+  const r = run(dir, scen, 'next');
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, /file format restored by runner: src\/app\.js \(BOM restored, line endings back to CRLF\)/);
+  assert.equal(readFileSync(path.join(dir, 'src', 'app.js'), 'utf8'), '﻿export const app = 2;\r\nexport const keep = 0;\r\n');
+  const diff = readFileSync(r.out.match(/diff: (\S+)/)[1].replace(/^/, `${dir}/`), 'utf8');
+  assert.doesNotMatch(diff, /-export const keep = 0;/, 'unchanged line must not appear as changed');
+  // new files are left as agy wrote them
+  assert.equal(readFileSync(path.join(dir, 'src', 'greeter.js'), 'utf8'), 'x\n');
+});
+
 test('blocked report stops the layer with exit code 2', () => {
   const dir = makeRepo();
   const scen = scenario(dir, [{ response: '## Recon\n...\n## Result: BLOCKED\n- Conflicts with the PLAN: no Result type exists' }]);

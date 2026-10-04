@@ -84,6 +84,11 @@ export function diffText(root: string, from: string, to: string, files?: string[
   return git(root, ['diff', '--no-renames', from, to, ...(files?.length ? ['--', ...files] : [])]);
 }
 
+/** Raw bytes of a file as stored in `commit`. */
+export function blob(root: string, commit: string, file: string): Buffer {
+  return execFileSync('git', ['show', `${commit}:${file}`], { cwd: root, maxBuffer: 256 * 1024 * 1024, windowsHide: true });
+}
+
 /** Restore the given files in the working tree to their state in `commit` (index untouched). */
 export function restoreFiles(root: string, commit: string, list: Change[]): void {
   for (const c of list) {
@@ -92,9 +97,8 @@ export function restoreFiles(root: string, commit: string, list: Change[]): void
       if (existsSync(abs)) unlinkSync(abs);
       continue;
     }
-    const blob = execFileSync('git', ['show', `${commit}:${c.file}`], { cwd: root, maxBuffer: 256 * 1024 * 1024, windowsHide: true });
     mkdirSync(path.dirname(abs), { recursive: true });
-    writeFileSync(abs, blob);
+    writeFileSync(abs, blob(root, commit, c.file));
   }
 }
 

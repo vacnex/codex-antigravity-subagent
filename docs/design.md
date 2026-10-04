@@ -129,6 +129,12 @@ check | import <file> | next | fix <PLAN> <findings.md> | undo <PLAN> | status |
   (assertion/compiler blocks, failed test names, summary; repeats dropped) instead of
   the output tail, which in a TSDC run was 200 lines of Vue warning dumps. A second
   auto-fix round runs only when the first one changed the errors.
+- File formats: agy's file tools drop UTF-8 BOMs and may rewrite line endings (TSDC:
+  BOM lost on a `.csproj` and a `.cs`). There is no project-wide rule to apply (TSDC
+  has no `.editorconfig`/`.gitattributes` and 101 of 387 `.cs` files carry a BOM), so
+  the runner restores each modified in-scope file to its own previous BOM/EOL, comparing
+  git blobs so `core.autocrlf` cannot trigger a false repair. Non-UTF-8, binary and new
+  files are left alone.
 - Manual testing by the user is the default; automated tests only for pure logic with
   an existing precedent. Before agy could run validate, test trial-and-error landed on Claude:
   TSDC task B (+552 lines, URL sync) cost Claude 84 calls / ~1.8M token-equivalents,

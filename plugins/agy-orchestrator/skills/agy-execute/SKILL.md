@@ -70,6 +70,11 @@ For each PLAN in `REVIEW`:
    layer and starts the next one (background). If the report said **last layer**, it
    only accepts: run `agy-run next && agy-run clean` in the foreground, in one call.
 
+The runner already put back each modified file's own BOM and line endings when agy
+changed them (`file format restored by runner`); do not re-check encodings by hand.
+New files keep agy's format: if the project has a rule (`.editorconfig`, AGENTS.md),
+check new files against it.
+
 Scope violations and failed validation were already sent back to agy by the runner
 (with the failure lines; a second round when the first one changed the errors). If they
 persist, treat them as larger issues.
